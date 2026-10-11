@@ -16,6 +16,11 @@ subprocess.run([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '
                 '--add-data', f'{ROOT / "src/adb_phone_controller/vendor"};vendor',
                 str(ROOT / 'packaging/windows-entry.py')], cwd=ROOT, check=True)
 folder = ROOT / 'dist/AndroidADBController'
+# Exercise the frozen executable and its native imports on the Windows runner.
+subprocess.run([str(folder / 'AndroidADBController.exe'), '--version'], check=True, timeout=60)
+tools = folder / '_internal/vendor/scrcpy'
+subprocess.run([str(tools / 'adb.exe'), 'version'], check=True, timeout=30)
+subprocess.run([str(tools / 'scrcpy.exe'), '--version'], check=True, timeout=30)
 for name in ['README.md', 'THIRD_PARTY.md']:
     shutil.copy(ROOT / name, folder / name)
 shutil.make_archive(str(ROOT / 'dist/adb-phone-controller-0.1.0-windows-x64'), 'zip', folder.parent, folder.name)

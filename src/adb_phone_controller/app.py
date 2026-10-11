@@ -1156,6 +1156,9 @@ class Controller(QMainWindow):
 
 
 def main():
+    if "--version" in sys.argv:
+        print("Android ADB Controller 0.1.0")
+        return 0
     if not shutil_which("adb"):
         app = QApplication(sys.argv)
         QMessageBox.critical(None, "ADB not found", "Install Android platform tools (adb), or use the bundled Windows release.")

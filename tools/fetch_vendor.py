@@ -24,6 +24,9 @@ if __name__ == "__main__":
     vendor = ROOT / "src/adb_phone_controller/vendor"
     vendor.mkdir(parents=True, exist_ok=True)
     (vendor / "scrcpy-server").write_bytes(download(f"scrcpy-server-v{VERSION}"))
+    if not args.windows:
+        import shutil
+        shutil.rmtree(vendor / "scrcpy", ignore_errors=True)
     if args.windows:
         import io
         archive = zipfile.ZipFile(io.BytesIO(download(f"scrcpy-win64-v{VERSION}.zip")))
