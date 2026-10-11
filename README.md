@@ -21,6 +21,9 @@ endpoint and matches transports by the phone's hardware serial. USB takes priori
 Changed Android wireless debugging ports must be entered again if ADB has not
 already discovered/connected the new endpoint. Disconnect pauses auto reconnect.
 
+Move the pointer over the phone image to scroll with the mouse wheel or trackpad.
+Horizontal scrolling and Shift+wheel are supported, including a rotated preview.
+
 ## Type directly on the phone
 
 Click a text field in the phone preview, then type on your computer keyboard.

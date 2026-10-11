@@ -86,6 +86,7 @@ def adb(args: list[str], *, serial: str | None = None, timeout: float = 8) -> by
 class ScreenView(QLabel):
     text_input = Signal(str, bool)
     phone_key = Signal(int, int)
+    phone_scroll = Signal(int, int, int, int, float, float)
     touch = Signal(int, int, int, int, int)
     tapped = Signal(int, int)
     swipe = Signal(int, int, int, int, int)
@@ -210,6 +211,24 @@ class ScreenView(QLabel):
     def keyReleaseEvent(self, event):
         event.accept()
 
+    def wheelEvent(self, event):
+        point = self._device_point(event.position().toPoint())
+        if point is None:
+            event.ignore()
+            return
+        # Qt already applies the operating system's natural-scroll preference.
+        pixels = event.pixelDelta()
+        delta = pixels if not pixels.isNull() else event.angleDelta()
+        divisor = 40.0 if not pixels.isNull() else 120.0
+        horizontal, vertical = delta.x() / divisor, delta.y() / divisor
+        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier and not horizontal:
+            horizontal, vertical = vertical, 0.0
+        rotation = (self.rotation + self._frame_rotation) % 360
+        direction = QTransform().rotate(-rotation).map(QPointF(horizontal, vertical))
+        if direction.x() or direction.y():
+            self.phone_scroll.emit(*point, *self._image_size, direction.x(), direction.y())
+        event.accept()
+
     def mousePressEvent(self, event):
         if event.button() != Qt.MouseButton.LeftButton:
             return
@@ -301,6 +320,14 @@ class VideoWorker(QThread):
                 chunk.extend(encoded)
             if chunk:
                 self.send_control(struct.pack(">BI", 1, len(chunk)) + chunk)
+
+    def send_scroll(self, x, y, width, height, horizontal, vertical):
+        # scrcpy represents scroll steps in [-16, 16] as signed fixed point.
+        def fixed(value):
+            return max(-32768, min(32767, round(value * 2048)))
+        packet = struct.pack(">BiiHHhhI", 3, x, y, width, height,
+                             fixed(horizontal), fixed(vertical), 0)
+        self.send_control(packet)
 
     def send_touch(self, action, x, y, width, height):
         control = self._control_socket
@@ -710,7 +737,7 @@ class Controller(QMainWindow):
         rotate_row.addWidget(self.rotation_label)
         rotate_row.addWidget(rotate_cw)
         controls.addLayout(rotate_row)
-        preview_help = QLabel("Click the phone to tap or type. Drag to swipe. Ctrl+V pastes text.")
+        preview_help = QLabel("Click the phone to tap or type. Drag to swipe or use the scroll wheel. Ctrl+V pastes text.")
         preview_help.setWordWrap(True)
         controls.addWidget(preview_help)
         recording_group = QGroupBox("Record video + audio")
@@ -766,6 +793,7 @@ class Controller(QMainWindow):
 
         self.screen.text_input.connect(self.send_preview_text)
         self.screen.phone_key.connect(self.send_preview_key)
+        self.screen.phone_scroll.connect(self.send_preview_scroll)
         self.screen.touch.connect(self.send_preview_touch)
         self.screen.tapped.connect(self.tap)
         self.screen.swipe.connect(self.swipe)
@@ -1209,6 +1237,10 @@ class Controller(QMainWindow):
     def send_preview_key(self, keycode, metastate):
         if self.frame_worker:
             self.frame_worker.send_key(keycode, metastate)
+
+    def send_preview_scroll(self, x, y, width, height, horizontal, vertical):
+        if self.frame_worker:
+            self.frame_worker.send_scroll(x, y, width, height, horizontal, vertical)
 
     def send_preview_touch(self, action, x, y, width, height):
         if self.frame_worker:
