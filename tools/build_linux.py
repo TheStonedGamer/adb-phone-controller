@@ -14,7 +14,7 @@ VERSION = '0.1.0'
 
 def tar_bytes(directory):
     buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode='w:gz') as archive:
+    with tarfile.open(fileobj=buffer, mode='w:gz', format=tarfile.GNU_FORMAT) as archive:
         for path in sorted(directory.iterdir()):
             archive.add(path, arcname=path.name)
     return buffer.getvalue()
