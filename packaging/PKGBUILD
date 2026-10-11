@@ -1,0 +1,19 @@
+pkgname=adb-phone-controller
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Android desktop controller with embedded scrcpy video and touch input'
+arch=('any')
+license=('custom')
+depends=('python' 'pyside6' 'python-av' 'android-tools' 'scrcpy')
+# Run tools/build_linux.py --arch to stage the source archive first.
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+package() {
+    cd "$srcdir/$pkgname-$pkgver"
+    install -d "$pkgdir/usr/lib/$pkgname" "$pkgdir/usr/bin"
+    cp -r src/adb_phone_controller "$pkgdir/usr/lib/$pkgname/"
+    install -Dm755 packaging/linux-launcher "$pkgdir/usr/bin/adb-phone-control"
+    install -Dm644 assets/adb-phone-controller.desktop "$pkgdir/usr/share/applications/adb-phone-controller.desktop"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 THIRD_PARTY.md "$pkgdir/usr/share/licenses/$pkgname/THIRD_PARTY.md"
+}

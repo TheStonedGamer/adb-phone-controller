@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+src/adb_phone_controller/vendor/
+*.spec
+packaging/pkg/
+packaging/src/
+*.pkg.tar.zst

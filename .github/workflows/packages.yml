@@ -1,0 +1,65 @@
+name: Packages
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  debian:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python tools/build_linux.py --deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debian
+          path: dist/*.deb
+  arch:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - run: pacman -Syu --noconfirm git python curl
+      - uses: actions/checkout@v4
+      - run: |
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          su builder -c "cd '$GITHUB_WORKSPACE' && python tools/build_linux.py --arch"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch
+          path: |
+            dist/*.pkg.tar.zst
+            dist/*.tar.gz
+            dist/PKGBUILD
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install pyinstaller "PySide6>=6.4,<7" "av>=14,<20"
+      - run: python tools/build_windows.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*.zip
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [debian, arch, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "$GITHUB_REF_NAME" artifacts/* --draft --title "Android ADB Controller $GITHUB_REF_NAME" --notes "Preview packages; see README for platform requirements and validation limits."

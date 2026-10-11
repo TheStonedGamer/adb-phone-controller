@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Android ADB Controller
+Comment=Android screen mirroring and control over USB or Wi-Fi
+Exec=adb-phone-control
+Icon=phone
+Terminal=false
+Categories=Utility;
+StartupNotify=true

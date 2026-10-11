@@ -1,0 +1,2 @@
+#!/bin/sh
+PYTHONPATH="/usr/lib/adb-phone-controller${PYTHONPATH:+:$PYTHONPATH}" exec /usr/bin/python3 -m adb_phone_controller "$@"
