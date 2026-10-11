@@ -847,6 +847,16 @@ class Controller(QMainWindow):
         self.video_source.addItem("Front camera", "front")
         self.video_source.currentIndexChanged.connect(self.change_video_source)
         camera_layout.addWidget(self.video_source)
+        camera_rotation_row = QHBoxLayout()
+        camera_rotation_row.addWidget(QLabel("Camera rotation"))
+        self.camera_rotation = QComboBox()
+        for degrees in (0, 90, 180, 270):
+            self.camera_rotation.addItem(f"{degrees}°", degrees)
+        self.camera_rotation.setEnabled(False)
+        self.camera_rotation.setToolTip("Rotate the camera preview and virtual webcam together. Saved separately for front and back cameras.")
+        self.camera_rotation.currentIndexChanged.connect(self.change_camera_rotation)
+        camera_rotation_row.addWidget(self.camera_rotation)
+        camera_layout.addLayout(camera_rotation_row)
         self.webcam_device = QLineEdit()
         self.webcam_device.setPlaceholderText("Virtual camera device (automatic if empty)")
         camera_layout.addWidget(self.webcam_device)
@@ -1076,6 +1086,15 @@ class Controller(QMainWindow):
         if self.record_process and self.record_process.poll() is None:
             self.stop_recording()
         self.screen.stop_scrolling()
+        source = self.video_source.currentData()
+        camera = source != "display"
+        rotation = int(self.settings.value(f"camera/{source}_rotation" if camera else "preview/rotation", 0)) % 360
+        self.camera_rotation.blockSignals(True)
+        self.camera_rotation.setCurrentIndex(max(0, self.camera_rotation.findData(rotation)))
+        self.camera_rotation.blockSignals(False)
+        self.camera_rotation.setEnabled(camera)
+        self.screen.set_rotation(rotation)
+        self.rotation_label.setText(f"{rotation}°")
         if self.serial:
             self.start_video_preview()
 
@@ -1198,14 +1217,27 @@ class Controller(QMainWindow):
         if self.serial:
             self.status.setText(f"Live {self.video_source.currentText()} · {image.width()} × {image.height()} · rotation {self.screen.rotation}°")
 
+    def change_camera_rotation(self):
+        if self.video_source.currentData() != "display":
+            self.apply_preview_rotation(self.camera_rotation.currentData())
+
     def rotate_preview(self, delta: int):
-        rotation = (self.screen.rotation + delta) % 360
-        self.screen.rotation = rotation
-        self.screen._render()
+        self.apply_preview_rotation((self.screen.rotation + delta) % 360)
+
+    def apply_preview_rotation(self, rotation: int):
+        rotation %= 360
+        self.screen.stop_scrolling()
+        self.screen.set_rotation(rotation)
         if self.webcam_worker:
             self.webcam_worker.rotation = rotation
         self.rotation_label.setText(f"{rotation}°")
-        self.settings.setValue("preview/rotation", rotation)
+        source = self.video_source.currentData()
+        camera = source != "display"
+        self.settings.setValue(f"camera/{source}_rotation" if camera else "preview/rotation", rotation)
+        if camera:
+            self.camera_rotation.blockSignals(True)
+            self.camera_rotation.setCurrentIndex(self.camera_rotation.findData(rotation))
+            self.camera_rotation.blockSignals(False)
         self.settings.sync()
 
     def save_screenshot(self):
@@ -1222,6 +1254,8 @@ class Controller(QMainWindow):
         if image is None or image.isNull():
             QMessageBox.information(self, "No screen image", "Connect to an authorized device first.")
             return
+        if self.video_source.currentData() != "display":
+            image = image.transformed(QTransform().rotate(self.screen.rotation))
         pictures = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.PicturesLocation)
         folder = Path(pictures) if pictures else Path.home() / "Pictures"
         try:

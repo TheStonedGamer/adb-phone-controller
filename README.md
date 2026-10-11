@@ -97,7 +97,10 @@ published. Manual workflow runs build artifacts without publishing a release.
 
 Select **Back camera** or **Front camera** in **Camera / webcam** to show a direct
 camera feed (Android 12+). Select **Phone screen** to return to touch control.
-The rotation buttons also rotate webcam output. Screenshot saves the camera view;
+Use **Camera rotation** (0°, 90°, 180°, 270°) or the rotation buttons to turn
+the preview and webcam output together without restarting the feed. Rotation is
+saved separately for front camera, back camera, and phone screen. Screenshot saves
+the rotated camera view;
 video recording currently requires Phone screen mode. Close other phone apps using
 the camera if capture fails.
 
