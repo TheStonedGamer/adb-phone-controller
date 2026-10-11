@@ -3,6 +3,9 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+from version import app_version
+
+VERSION = app_version()
 
 ROOT = Path(__file__).resolve().parents[1]
 if sys.platform != 'win32':
@@ -23,4 +26,4 @@ subprocess.run([str(tools / 'adb.exe'), 'version'], check=True, timeout=30)
 subprocess.run([str(tools / 'scrcpy.exe'), '--version'], check=True, timeout=30)
 for name in ['README.md', 'THIRD_PARTY.md']:
     shutil.copy(ROOT / name, folder / name)
-shutil.make_archive(str(ROOT / 'dist/adb-phone-controller-0.1.0-windows-x64'), 'zip', folder.parent, folder.name)
+shutil.make_archive(str(ROOT / f'dist/adb-phone-controller-{VERSION}-windows-x64'), 'zip', folder.parent, folder.name)

@@ -73,7 +73,7 @@ python tools/build_windows.py
 ```
 
 Artifacts are written to `dist/`. `.github/workflows/packages.yml` builds all three
-platforms on their native runners. Tags `v*` also create a draft GitHub release.
+platforms on their native runners. Tags `v*` publish a GitHub release only after all platform builds and checks succeed.
 
 ## Current verification limits
 
@@ -81,3 +81,14 @@ Linux video decoding, transport selection, touch event serialization, and indica
 states were checked locally. CI also installs the package on Debian 13 and checks
 the frozen executable and bundled tools on Windows. Camera/video transitions have previously shown colour
 corruption; the session-aware decoder needs longer testing. Windows phone interaction and full Debian desktop behavior require native validation. Packaging is an initial preview.
+
+## Publish a release
+
+1. Update `__version__` in `src/adb_phone_controller/__init__.py`.
+2. Update `RELEASE_NOTES.md`, commit, and push `main`.
+3. Create and push the matching tag: `git tag v0.1.0 && git push origin v0.1.0`.
+
+CI rejects tags that do not match the source version. It builds all three packages,
+checks Windows executables and Debian installation, generates SHA256SUMS, uploads
+assets, and publishes the release. An existing draft for that tag is updated and
+published. Manual workflow runs build artifacts without publishing a release.

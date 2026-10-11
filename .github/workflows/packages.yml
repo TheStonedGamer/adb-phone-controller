@@ -3,10 +3,22 @@ on:
   workflow_dispatch:
   push:
     tags: ['v*']
+concurrency:
+  group: packages-${{ github.ref }}
+  cancel-in-progress: false
 permissions:
   contents: read
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python tools/version.py
   debian:
+    needs: validate
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -18,7 +30,7 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/src:ro" debian:13 sh -c '
             apt-get update &&
-            apt-get install -y /src/dist/adb-phone-controller_0.1.0-1_amd64.deb &&
+            apt-get install -y /src/dist/*.deb &&
             QT_QPA_PLATFORM=offscreen adb-phone-control --version &&
             /usr/lib/adb-phone-controller/adb_phone_controller/vendor/scrcpy/adb version &&
             /usr/lib/adb-phone-controller/adb_phone_controller/vendor/scrcpy/scrcpy --version'
@@ -27,6 +39,7 @@ jobs:
           name: debian
           path: dist/*.deb
   arch:
+    needs: validate
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     steps:
@@ -44,6 +57,7 @@ jobs:
             dist/*.tar.gz
             dist/PKGBUILD
   windows:
+    needs: validate
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -67,7 +81,25 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-      - env:
+      - uses: actions/checkout@v4
+        with:
+          path: source
+      - name: Generate package checksums
+        run: |
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          root = Path('artifacts')
+          files = sorted(p for p in root.iterdir() if p.is_file())
+          (root / 'SHA256SUMS').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in files))
+          PY
+      - name: Publish release after all platform checks pass
+        env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "$GITHUB_REF_NAME" artifacts/* --draft --title "Android ADB Controller $GITHUB_REF_NAME" --notes "Preview packages; see README for platform requirements and validation limits."
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "Android ADB Controller $GITHUB_REF_NAME" --notes-file source/RELEASE_NOTES.md
+          fi
+          gh release upload "$GITHUB_REF_NAME" artifacts/* --clobber
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest --title "Android ADB Controller $GITHUB_REF_NAME" --notes-file source/RELEASE_NOTES.md

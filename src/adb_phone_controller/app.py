@@ -8,6 +8,7 @@ import math
 import shutil
 import socket
 import av
+from adb_phone_controller import __version__
 import struct
 import signal
 import subprocess
@@ -1335,7 +1336,7 @@ class Controller(QMainWindow):
 
 def main():
     if "--version" in sys.argv:
-        print("Android ADB Controller 0.1.0")
+        print(f"Android ADB Controller {__version__}")
         return 0
     if not shutil_which("adb"):
         app = QApplication(sys.argv)

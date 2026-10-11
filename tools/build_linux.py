@@ -7,10 +7,11 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+from version import app_version
 
 ROOT = Path(__file__).resolve().parents[1]
 NAME = 'adb-phone-controller'
-VERSION = '0.1.0'
+VERSION = app_version()
 
 def root_owned(info):
     info.uid = info.gid = 0
@@ -76,7 +77,7 @@ if args.arch:
         for name in ['src/adb_phone_controller', 'packaging/linux-launcher', 'assets', 'README.md', 'THIRD_PARTY.md']:
             archive.add(ROOT / name, arcname=f'{NAME}-{VERSION}/{name}', filter=lambda item: None if '__pycache__' in item.name else item)
     digest = hashlib.sha256(source.read_bytes()).hexdigest()
-    pkgbuild = (ROOT / 'packaging/PKGBUILD').read_text().replace("sha256sums=('SKIP')", f"sha256sums=('{digest}')")
+    pkgbuild = (ROOT / 'packaging/PKGBUILD').read_text().replace('pkgver=0.1.0', f'pkgver={VERSION}').replace("sha256sums=('SKIP')", f"sha256sums=('{digest}')")
     with tempfile.TemporaryDirectory(prefix='adb-controller-arch-') as temp:
         stage = Path(temp)
         shutil.copy(source, stage / source.name)
