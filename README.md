@@ -141,3 +141,10 @@ loopback device path, such as `/dev/video10`. Your user needs write access to th
 device. Select **PhoneCamera** in the calling application after starting output.
 
 Driver/backend documentation: https://github.com/letmaik/pyvirtualcam#supported-virtual-cameras
+
+### Rotate the phone display
+
+**Rotate phone ↻** turns the actual phone display by 90° and locks its orientation.
+**Auto rotate phone** restores sensor rotation. Apps that require a particular
+orientation may override the request. These controls change the phone's rotation
+setting; camera rotation and the preview rotation controls remain separate.

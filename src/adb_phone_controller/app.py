@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 import math
 import shutil
 import socket
@@ -836,6 +837,16 @@ class Controller(QMainWindow):
         rotate_row.addWidget(self.rotation_label)
         rotate_row.addWidget(rotate_cw)
         controls.addLayout(rotate_row)
+        phone_rotation_row = QHBoxLayout()
+        rotate_phone = QPushButton("Rotate phone ↻")
+        rotate_phone.setToolTip("Rotate the actual phone display 90° and lock its orientation. Apps may enforce their own orientation.")
+        rotate_phone.clicked.connect(self.rotate_phone)
+        auto_rotate = QPushButton("Auto rotate phone")
+        auto_rotate.setToolTip("Let the phone's orientation sensor control screen rotation again.")
+        auto_rotate.clicked.connect(self.auto_rotate_phone)
+        phone_rotation_row.addWidget(rotate_phone)
+        phone_rotation_row.addWidget(auto_rotate)
+        controls.addLayout(phone_rotation_row)
         preview_help = QLabel("Click the phone to tap or type. Drag to swipe or use the scroll wheel. Ctrl+V pastes text.")
         preview_help.setWordWrap(True)
         controls.addWidget(preview_help)
@@ -1216,6 +1227,36 @@ class Controller(QMainWindow):
         self.x.setMaximum(max(0, image.width() - 1)); self.y.setMaximum(max(0, image.height() - 1))
         if self.serial:
             self.status.setText(f"Live {self.video_source.currentText()} · {image.width()} × {image.height()} · rotation {self.screen.rotation}°")
+
+    def rotate_phone(self):
+        if not self.serial:
+            self.status.setText("Connect a phone first.")
+            return
+        try:
+            # Read the real display orientation when auto rotation is enabled;
+            # user_rotation alone may contain an old locked orientation.
+            output = adb(["shell", "dumpsys", "input"], serial=self.serial, timeout=3).decode(errors="replace")
+            match = re.search(r"SurfaceOrientation:\s*([0-3])\b", output)
+            if match:
+                current = int(match.group(1))
+            else:
+                value = adb(["shell", "settings", "get", "system", "user_rotation"], serial=self.serial).decode().strip()
+                current = int(value) if value in ("0", "1", "2", "3") else 0
+            rotation = (current + 1) % 4
+            # WindowManager rotates and locks atomically, without changing the
+            # preview transform or rotating an already rotated feed twice.
+            result = adb(["shell", "wm", "user-rotation", "lock", str(rotation)], serial=self.serial).decode(errors="replace").strip()
+            if result:
+                raise RuntimeError(result)
+            self.status.setText(f"Phone rotation locked to {rotation * 90}°. Use Auto rotate phone to restore sensor rotation.")
+        except Exception as exc:
+            self.report_error(exc)
+
+    def auto_rotate_phone(self):
+        result = self.run_device(["shell", "wm", "user-rotation", "free"])
+        if result is not None:
+            message = result.decode(errors="replace").strip()
+            self.status.setText(message or "Phone auto rotation enabled.")
 
     def change_camera_rotation(self):
         if self.video_source.currentData() != "display":
