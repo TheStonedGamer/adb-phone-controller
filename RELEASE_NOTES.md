@@ -1,18 +1,25 @@
-Android ADB Controller's first release includes:
+# Android ADB Controller 0.1.1
 
-- Embedded scrcpy video with session-aware decoding and rotation handling.
-- Live taps, swipes, mouse-wheel scrolling with momentum, and trackpad scrolling.
-- Direct keyboard input, editing keys, and clipboard paste.
-- Automatic USB preference and paired Wi-Fi fallback for the same phone.
-- Glowing connection indicator and disconnect/reconnect controls.
-- Screenshots, video/audio recording, and app management.
+- Direct front/back phone camera preview (Android 12+).
+- Virtual webcam output at 1280×720, 30 fps, with start/stop controls.
+- Camera rotation controls saved separately for front and back cameras; rotation applies to preview, webcam output, and snapshots.
+- Buttons to rotate the actual phone display and restore auto rotation.
+- Scrollable controls sidebar and webcam setup instructions.
 
-Downloads:
+## Setup
 
-- **Windows x64:** extract the ZIP and run `AndroidADBController.exe`. ADB and scrcpy are bundled. A console accompanies the app for recording shutdown.
-- **Debian 13+ x86-64:** install the `.deb` with `sudo apt install ./adb-phone-controller_*_amd64.deb`.
-- **Arch:** install the `.pkg.tar.zst` with `sudo pacman -U ./adb-phone-controller-*-any.pkg.tar.zst`.
+Windows builds include the webcam backend; install OBS Studio to register OBS Virtual Camera and leave OBS's own virtual camera stopped.
+Linux webcam output requires v4l2loopback and the optional Python backend described in README.md.
+Phone microphone forwarding and camera video recording are not included; video recording requires Phone screen mode.
 
-`SHA256SUMS`, the Arch `PKGBUILD`, and its source archive are included. See README.md for setup instructions.
+## Downloads
 
-Builds include Windows executable/tool launch checks and installation checks in a clean Debian 13 container. Linux live video has been tested on a Samsung phone. Windows interaction with a real phone still needs testing; camera/video transitions have shown intermittent corruption and need longer testing.
+- **Windows x64:** extract the ZIP and run `AndroidADBController.exe`.
+- **Debian 13+ x86-64:** `sudo apt install ./adb-phone-controller_*_amd64.deb`.
+- **Arch:** `sudo pacman -U ./adb-phone-controller-*-any.pkg.tar.zst`.
+
+Checksums, Arch PKGBUILD, and source archive are included.
+
+## Validation status
+
+The new camera, virtual webcam, and phone rotation controls have not yet been tested end to end on a connected phone. Windows real-device interaction also needs testing. Previous camera/video transitions showed intermittent corruption. CI performs package build and launch checks before publishing.
