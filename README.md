@@ -92,3 +92,49 @@ CI rejects tags that do not match the source version. It builds all three packag
 checks Windows executables and Debian installation, generates SHA256SUMS, uploads
 assets, and publishes the release. An existing draft for that tag is updated and
 published. Manual workflow runs build artifacts without publishing a release.
+
+## Phone camera and webcam
+
+Select **Back camera** or **Front camera** in **Camera / webcam** to show a direct
+camera feed (Android 12+). Select **Phone screen** to return to touch control.
+The rotation buttons also rotate webcam output. Screenshot saves the camera view;
+video recording currently requires Phone screen mode. Close other phone apps using
+the camera if capture fails.
+
+**Start webcam** publishes the selected camera as a 1280×720, 30 fps virtual camera.
+Choose that camera in your video calling application. Portrait feeds have black
+side margins. Microphone audio is not forwarded. Stop webcam releases the camera;
+changing source, restarting the stream, disconnecting, and closing the app also
+stop output. Start webcam again after reconnecting.
+
+### Windows
+
+The portable build includes the Python webcam backend. Install OBS Studio once to
+register **OBS Virtual Camera**. Keep OBS's own virtual camera stopped, click
+Start webcam here, then select OBS Virtual Camera in your calling app. A virtual
+camera driver is required; the app does not install drivers automatically.
+
+### Linux (Debian and Arch)
+
+Install the v4l2loopback module matching your kernel (Debian:
+`sudo apt install v4l2loopback-dkms linux-headers-$(uname -r) python3-pip`;
+Arch: install `v4l2loopback-dkms` and your kernel's headers).
+Load it with:
+
+```sh
+sudo modprobe v4l2loopback devices=1 exclusive_caps=1 card_label=PhoneCamera
+```
+
+For a source install, install the optional dependencies into the app's venv with
+`python -m pip install '.[webcam]'`. For Debian/Arch packages, install the backend
+into the app's dedicated optional dependency directory:
+
+```sh
+python3 -m pip install --target "${XDG_DATA_HOME:-$HOME/.local/share}/adb-phone-controller/webcam" 'pyvirtualcam>=0.15,<0.16' 'numpy>=1.26,<3'
+```
+
+Leave the virtual camera device field empty for automatic selection, or enter the
+loopback device path, such as `/dev/video10`. Your user needs write access to that
+device. Select **PhoneCamera** in the calling application after starting output.
+
+Driver/backend documentation: https://github.com/letmaik/pyvirtualcam#supported-virtual-cameras

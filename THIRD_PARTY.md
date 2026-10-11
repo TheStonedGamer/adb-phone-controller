@@ -22,3 +22,8 @@ repository scrcpy package; Debian bundles the official Linux x86-64 scrcpy relea
 and its included license notices.
 The application's license has not been selected; no open-source license grant is
 implied for the original application code. Select one before public distribution.
+
+Webcam output uses pyvirtualcam (MIT) and NumPy (BSD-3-Clause). Windows builds
+collect their package data and license notices with PyInstaller.
+- pyvirtualcam: https://github.com/letmaik/pyvirtualcam
+- NumPy: https://numpy.org/doc/stable/license.html

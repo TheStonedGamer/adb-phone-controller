@@ -5,6 +5,7 @@ pkgdesc='Android desktop controller with embedded scrcpy video and touch input'
 arch=('any')
 license=('custom')
 depends=('python' 'pyside6' 'python-av' 'android-tools' 'scrcpy')
+optdepends=('v4l2loopback-dkms: virtual webcam kernel driver' 'python-pip: install optional webcam backend')
 # Run tools/build_linux.py --arch to stage the source archive first.
 source=("$pkgname-$pkgver.tar.gz")
 sha256sums=('SKIP')

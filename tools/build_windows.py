@@ -15,7 +15,7 @@ subprocess.run([sys.executable, str(ROOT / 'tools/fetch_vendor.py'), '--windows'
 # MP4/MKV files correctly. A future GUI-only launcher can own a hidden console.
 subprocess.run([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onedir', '--console',
                 '--name', 'AndroidADBController', '--paths', str(ROOT / 'src'),
-                '--collect-all', 'av', '--collect-submodules', 'adb_phone_controller',
+                '--collect-all', 'av', '--collect-all', 'pyvirtualcam', '--collect-all', 'numpy', '--collect-submodules', 'adb_phone_controller',
                 '--add-data', f'{ROOT / "src/adb_phone_controller/vendor"};vendor',
                 str(ROOT / 'packaging/windows-entry.py')], cwd=ROOT, check=True)
 folder = ROOT / 'dist/AndroidADBController'

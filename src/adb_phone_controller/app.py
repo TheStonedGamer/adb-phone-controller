@@ -305,13 +305,60 @@ class ScreenView(QLabel):
         self._press = None
 
 
+class WebcamWorker(QThread):
+    output_ready = Signal(str)
+    output_error = Signal(str)
+
+    def __init__(self, source, device=""):
+        super().__init__()
+        self.source = source
+        self.device = device
+        self.rotation = 0
+        self._stop_event = threading.Event()
+
+    def stop(self):
+        self._stop_event.set()
+
+    def run(self):
+        try:
+            if sys.platform != "win32":
+                optional = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "adb-phone-controller/webcam"
+                if optional.is_dir() and str(optional) not in sys.path:
+                    sys.path.append(str(optional))
+            import numpy as np
+            import pyvirtualcam
+            options = {"device": self.device} if self.device else {}
+            # Keep the webcam format stable when the phone rotates or reconnects.
+            with pyvirtualcam.Camera(width=1280, height=720, fps=30, **options) as camera:
+                self.output_ready.emit(f"Webcam active: {camera.device}")
+                while not self._stop_event.is_set():
+                    image = self.source.latest_video_frame
+                    canvas = np.zeros((720, 1280, 3), dtype=np.uint8)
+                    if image is not None:
+                        image = image.transformed(QTransform().rotate(self.rotation))
+                        image = image.scaled(1280, 720, Qt.AspectRatioMode.KeepAspectRatio,
+                                             Qt.TransformationMode.SmoothTransformation)
+                        image = image.convertToFormat(QImage.Format.Format_RGB888)
+                        pixels = np.frombuffer(image.constBits(), dtype=np.uint8).reshape(
+                            image.height(), image.bytesPerLine())[:, :image.width() * 3]
+                        pixels = pixels.reshape(image.height(), image.width(), 3)
+                        x, y = (1280 - image.width()) // 2, (720 - image.height()) // 2
+                        canvas[y:y + image.height(), x:x + image.width()] = pixels
+                    camera.send(canvas)
+                    if self._stop_event.wait(1 / 30):
+                        break
+        except Exception as exc:
+            self.output_error.emit(str(exc))
+
+
 class VideoWorker(QThread):
     frame_ready = Signal(QImage, int)
     capture_error = Signal(str)
 
-    def __init__(self, serial: str):
+    def __init__(self, serial: str, source="display"):
         super().__init__()
         self.serial = serial
+        self.source = source
         self._process: subprocess.Popen | None = None
         self._socket: socket.socket | None = None
         self._control_socket = None
@@ -418,10 +465,14 @@ class VideoWorker(QThread):
                 raise RuntimeError(f"Could not find scrcpy server at {server_jar}")
             adb(["push", str(server_jar), "/data/local/tmp/scrcpy-server.jar"], serial=self.serial, timeout=20)
             adb(["forward", "tcp:27183", "localabstract:scrcpy_00027183"], serial=self.serial, timeout=5)
+            source_options = []
+            if self.source != "display":
+                source_options = ["video_source=camera", f"camera_facing={self.source}",
+                                  "camera_ar=16:9", "camera_fps=30", "control=false"]
             server = subprocess.Popen(
                 ["adb", "-s", self.serial, "shell", "CLASSPATH=/data/local/tmp/scrcpy-server.jar", "app_process", "/", "com.genymobile.scrcpy.Server", version,
                  "scid=27183", "tunnel_forward=true", "send_device_meta=false",
-                 "audio=false", "video_codec=h264", "max_size=1280", "max_fps=30"],
+                 "audio=false", "video_codec=h264", "max_size=1280", "max_fps=30"] + source_options,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
             self._process = server
             deadline = time.monotonic() + 15
@@ -452,8 +503,9 @@ class VideoWorker(QThread):
                 raise RuntimeError(log or "Could not connect to the scrcpy video stream")
             self._socket = client
             client.settimeout(None)
-            self._control_socket = socket.create_connection(("127.0.0.1", 27183), timeout=2)
-            self._control_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            if self.source == "display":
+                self._control_socket = socket.create_connection(("127.0.0.1", 27183), timeout=2)
+                self._control_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             codec_header = self._read_exact(client, 4)
             if codec_header != b"h264":
                 raise RuntimeError(f"Unexpected scrcpy codec: {codec_header!r}")
@@ -671,6 +723,7 @@ class Controller(QMainWindow):
         self.resize(1000, 760)
         self.serial: str | None = None
         self.connection_paused = False
+        self.webcam_worker = None
         if sys.platform == "win32":
             config_dir = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppConfigLocation))
         else:
@@ -786,6 +839,27 @@ class Controller(QMainWindow):
         preview_help = QLabel("Click the phone to tap or type. Drag to swipe or use the scroll wheel. Ctrl+V pastes text.")
         preview_help.setWordWrap(True)
         controls.addWidget(preview_help)
+        camera_group = QGroupBox("Camera / webcam")
+        camera_layout = QVBoxLayout(camera_group)
+        self.video_source = QComboBox()
+        self.video_source.addItem("Phone screen", "display")
+        self.video_source.addItem("Back camera", "back")
+        self.video_source.addItem("Front camera", "front")
+        self.video_source.currentIndexChanged.connect(self.change_video_source)
+        camera_layout.addWidget(self.video_source)
+        self.webcam_device = QLineEdit()
+        self.webcam_device.setPlaceholderText("Virtual camera device (automatic if empty)")
+        camera_layout.addWidget(self.webcam_device)
+        self.webcam_button = QPushButton("Start webcam")
+        self.webcam_button.clicked.connect(self.toggle_webcam)
+        camera_layout.addWidget(self.webcam_button)
+        self.webcam_status = QLabel("Webcam stopped")
+        self.webcam_status.setWordWrap(True)
+        camera_layout.addWidget(self.webcam_status)
+        setup = QPushButton("Webcam setup…")
+        setup.clicked.connect(self.webcam_setup)
+        camera_layout.addWidget(setup)
+        controls.addWidget(camera_group)
         recording_group = QGroupBox("Record video + audio")
         recording_layout = QHBoxLayout(recording_group)
         self.record_start_button = QPushButton("Start recording")
@@ -829,7 +903,12 @@ class Controller(QMainWindow):
 
         body = QHBoxLayout()
         body.addWidget(self.screen_host, 1)
-        body.addWidget(right)
+        sidebar = QScrollArea()
+        sidebar.setWidgetResizable(True)
+        sidebar.setWidget(right)
+        sidebar.setMinimumWidth(320)
+        sidebar.setMaximumWidth(400)
+        body.addWidget(sidebar)
         root = QVBoxLayout()
         root.addLayout(top)
         root.addWidget(self.status)
@@ -935,6 +1014,7 @@ class Controller(QMainWindow):
         if selected == self.serial and self.frame_worker:
             self.update_connection_badge(selected)
             return
+        self.stop_webcam()
         self.screen.stop_scrolling()
         if self.record_process and self.record_process.poll() is None:
             self.stop_recording()
@@ -972,19 +1052,86 @@ class Controller(QMainWindow):
     def start_video_preview(self):
         if not self.serial:
             return
+        self.stop_webcam()
         if self.frame_worker:
             self.frame_worker.stop()
             if not self.frame_worker.wait(25000):
                 self.status.setText("Previous video stream is still stopping")
                 return
-        self.frame_worker = VideoWorker(self.serial)
+        self.latest_frame = None
+        self.screen.clear()
+        self.screen._image_size = None
+        self.screen._source_pixmap = None
+        self.frame_worker = VideoWorker(self.serial, self.video_source.currentData())
         # Poll the newest frame instead of queueing every decoded image.
         if not hasattr(self, "video_timer"):
             self.video_timer = QTimer(self)
             self.video_timer.timeout.connect(self.present_video_frame)
             self.video_timer.start(16)
-        self.frame_worker.capture_error.connect(self.status.setText)
+        self.frame_worker.capture_error.connect(self.video_failed)
         self.frame_worker.start()
+
+    def change_video_source(self):
+        self.stop_webcam()
+        if self.record_process and self.record_process.poll() is None:
+            self.stop_recording()
+        self.screen.stop_scrolling()
+        if self.serial:
+            self.start_video_preview()
+
+    def video_failed(self, message):
+        if self.sender() is not self.frame_worker:
+            return
+        self.frame_worker.latest_video_frame = None
+        self.stop_webcam()
+        self.status.setText(message)
+
+    def webcam_setup(self):
+        QMessageBox.information(self, "Webcam setup",
+            "Camera capture requires Android 12 or newer. Select Front camera or Back camera, "
+            "then Start webcam. Choose the virtual camera in your calling app. Audio uses "
+            "your computer microphone.\n\n"
+            "Windows: install OBS Studio to register OBS Virtual Camera. Leave OBS's own "
+            "virtual camera stopped while this app supplies it.\n\n"
+            "Linux: install v4l2loopback for your kernel, then load it:\n"
+            "sudo modprobe v4l2loopback devices=1 exclusive_caps=1 card_label=PhoneCamera\n"
+            "Enter its /dev/videoN path above if automatic selection fails.\n\n"
+            "Source/Linux installs also need pyvirtualcam and numpy in the app's Python "
+            "environment (pip install pyvirtualcam numpy). See README for package setup.")
+
+    def toggle_webcam(self):
+        if self.webcam_worker:
+            self.stop_webcam()
+            return
+        if self.video_source.currentData() == "display":
+            self.video_source.setCurrentIndex(1)
+        if not self.frame_worker or not self.frame_worker.isRunning():
+            self.webcam_status.setText("Connect a phone and start its camera first.")
+            return
+        worker = WebcamWorker(self.frame_worker, self.webcam_device.text().strip())
+        worker.rotation = self.screen.rotation
+        self.webcam_worker = worker
+        worker.output_ready.connect(self.webcam_status.setText)
+        worker.output_error.connect(self.webcam_failed)
+        self.webcam_button.setText("Stop webcam")
+        self.webcam_status.setText("Starting virtual camera…")
+        self.webcam_device.setEnabled(False)
+        worker.start()
+
+    def webcam_failed(self, message):
+        if self.sender() is not self.webcam_worker:
+            return
+        self.stop_webcam()
+        self.webcam_status.setText(f"Webcam unavailable: {message}. Open Webcam setup for instructions.")
+
+    def stop_webcam(self):
+        if self.webcam_worker:
+            self.webcam_worker.stop()
+            self.webcam_worker.wait()
+            self.webcam_worker = None
+        self.webcam_button.setText("Start webcam")
+        self.webcam_device.setEnabled(True)
+        self.webcam_status.setText("Webcam stopped")
 
     def wifi_connect(self):
         dialog = ConnectDialog(self.settings, self)
@@ -1049,18 +1196,23 @@ class Controller(QMainWindow):
         self.screen.show_video_frame(image, rotation)
         self.x.setMaximum(max(0, image.width() - 1)); self.y.setMaximum(max(0, image.height() - 1))
         if self.serial:
-            self.status.setText(f"Live scrcpy feed {image.width()} × {image.height()} · rotation {rotation}°")
+            self.status.setText(f"Live {self.video_source.currentText()} · {image.width()} × {image.height()} · rotation {self.screen.rotation}°")
 
     def rotate_preview(self, delta: int):
         rotation = (self.screen.rotation + delta) % 360
         self.screen.rotation = rotation
         self.screen._render()
+        if self.webcam_worker:
+            self.webcam_worker.rotation = rotation
         self.rotation_label.setText(f"{rotation}°")
         self.settings.setValue("preview/rotation", rotation)
         self.settings.sync()
 
     def save_screenshot(self):
         image = self.latest_frame
+        if (image is None or image.isNull()) and self.video_source.currentData() != "display":
+            self.status.setText("Wait for a camera frame before taking a snapshot.")
+            return
         if (image is None or image.isNull()) and self.serial:
             try:
                 image = QImage.fromData(adb(["exec-out", "screencap", "-p"], serial=self.serial, timeout=8), "PNG")
@@ -1109,6 +1261,9 @@ class Controller(QMainWindow):
         RecordingSettingsDialog(self.settings, self).exec()
 
     def start_recording(self):
+        if self.video_source.currentData() != "display":
+            self.status.setText("Switch to Phone screen to record. Camera snapshots are available with Screenshot.")
+            return
         if not self.serial:
             QMessageBox.information(self, "No device selected", "Connect and select an authorized device first.")
             return
@@ -1317,6 +1472,7 @@ class Controller(QMainWindow):
         self.text.clear()
 
     def closeEvent(self, event):
+        self.stop_webcam()
         self.refresh_timer.stop()
         scanner = getattr(self, "device_scanner", None)
         if scanner and scanner.isRunning():

@@ -61,6 +61,7 @@ Architecture: amd64
 Maintainer: Android ADB Controller contributors
 Depends: python3 (>= 3.11), python3-av (>= 14), python3-pyside6.qtwidgets, libudev1, libgcc-s1, libc6 (>= 2.35)
 Recommends: android-sdk-platform-tools-common
+Suggests: v4l2loopback-dkms, python3-pip
 Section: utils
 Priority: optional
 Description: Android screen mirroring and control over USB or Wi-Fi
