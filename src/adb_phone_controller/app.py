@@ -16,7 +16,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal, QThread, QSettings, QStandardPaths, QRectF, QPointF
+from PySide6.QtCore import Qt, QTimer, Signal, QThread, QSettings, QStandardPaths, QRectF, QPointF, QEvent
 from PySide6.QtGui import QImage, QPixmap, QTransform, QColor
 from PySide6.QtWidgets import (
     QApplication,
@@ -84,6 +84,8 @@ def adb(args: list[str], *, serial: str | None = None, timeout: float = 8) -> by
 
 
 class ScreenView(QLabel):
+    text_input = Signal(str, bool)
+    phone_key = Signal(int, int)
     touch = Signal(int, int, int, int, int)
     tapped = Signal(int, int)
     swipe = Signal(int, int, int, int, int)
@@ -94,6 +96,9 @@ class ScreenView(QLabel):
         self.setMinimumSize(300, 450)
         self.setStyleSheet("background:#17191e;color:#c7cbd3;border:1px solid #353942;border-radius:10px;")
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
+        self.setToolTip("Click a phone text field and type here. Ctrl+V pastes from this computer.")
         self._image_size: tuple[int, int] | None = None
         self._source_pixmap: QPixmap | None = None
         self.rotation = 0
@@ -159,12 +164,59 @@ class ScreenView(QLabel):
         source = inverse.map(rotated_point)
         return max(0, min(iw - 1, int(source.x()))), max(0, min(ih - 1, int(source.y())))
 
+    def event(self, event):
+        if event.type() == QEvent.Type.ShortcutOverride:
+            event.accept()
+            return True
+        if event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            self.keyPressEvent(event)
+            return True
+        return super().event(event)
+
+    def inputMethodEvent(self, event):
+        if event.commitString():
+            self.text_input.emit(event.commitString(), True)
+        event.accept()
+
+    def keyPressEvent(self, event):
+        modifiers = event.modifiers()
+        ctrl = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        alt = bool(modifiers & Qt.KeyboardModifier.AltModifier)
+        meta = (4096 if ctrl else 0) | (1 if shift else 0) | (2 if alt else 0)
+        key = event.key()
+        if ctrl and not alt and key == Qt.Key.Key_V:
+            text = QApplication.clipboard().text()
+            if text:
+                self.text_input.emit(text, True)
+        else:
+            keys = {Qt.Key.Key_Backspace: 67, Qt.Key.Key_Delete: 112,
+                    Qt.Key.Key_Return: 66, Qt.Key.Key_Enter: 66,
+                    Qt.Key.Key_Left: 21, Qt.Key.Key_Right: 22,
+                    Qt.Key.Key_Up: 19, Qt.Key.Key_Down: 20,
+                    Qt.Key.Key_Home: 122, Qt.Key.Key_End: 123,
+                    Qt.Key.Key_PageUp: 92, Qt.Key.Key_PageDown: 93,
+                    Qt.Key.Key_Tab: 61, Qt.Key.Key_Backtab: 61,
+                    Qt.Key.Key_Escape: 4}
+            if key in keys:
+                self.phone_key.emit(keys[key], meta | (1 if key == Qt.Key.Key_Backtab else 0))
+            elif ctrl and not alt and Qt.Key.Key_A <= key <= Qt.Key.Key_Z:
+                self.phone_key.emit(29 + key - Qt.Key.Key_A, meta)
+            elif event.text() and all(ch.isprintable() for ch in event.text()):
+                text = event.text()
+                self.text_input.emit(text, not text.isascii())
+        event.accept()
+
+    def keyReleaseEvent(self, event):
+        event.accept()
+
     def mousePressEvent(self, event):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         point = self._device_point(event.position().toPoint())
         if point is None:
             return
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
         self._press = point
         self._gesture_size = self._image_size
         self._last_touch = point
@@ -213,6 +265,42 @@ class VideoWorker(QThread):
             self._decoder.terminate()
         if self._process and self._process.poll() is None:
             self._process.terminate()
+
+    def send_control(self, packet):
+        control = self._control_socket
+        if control is None:
+            self.capture_error.emit("Keyboard unavailable until the live feed connects")
+            return
+        try:
+            control.sendall(packet)
+        except OSError as exc:
+            self.capture_error.emit(f"Phone input failed: {exc}")
+
+    def send_key(self, keycode, metastate=0):
+        # Android DOWN and UP together keep editing keys from becoming stuck.
+        packet = b"".join(struct.pack(">BBIII", 0, action, keycode, 0, metastate)
+                          for action in (0, 1))
+        self.send_control(packet)
+
+    def send_text(self, text, paste=False):
+        if paste:
+            payload = text.encode("utf-8")
+            if len(payload) > (1 << 18) - 14:
+                self.capture_error.emit("Paste is too large (maximum 256 KiB)")
+                return
+            # Sequence zero disables clipboard acknowledgements; paste=true
+            # injects Android's paste key after setting the phone clipboard.
+            self.send_control(struct.pack(">BQBI", 9, 0, 1, len(payload)) + payload)
+        else:
+            chunk = bytearray()
+            for char in text:
+                encoded = char.encode("utf-8")
+                if len(chunk) + len(encoded) > 300:
+                    self.send_control(struct.pack(">BI", 1, len(chunk)) + chunk)
+                    chunk.clear()
+                chunk.extend(encoded)
+            if chunk:
+                self.send_control(struct.pack(">BI", 1, len(chunk)) + chunk)
 
     def send_touch(self, action, x, y, width, height):
         control = self._control_socket
@@ -622,7 +710,9 @@ class Controller(QMainWindow):
         rotate_row.addWidget(self.rotation_label)
         rotate_row.addWidget(rotate_cw)
         controls.addLayout(rotate_row)
-        controls.addWidget(QLabel("Tap the phone image or drag on it to tap or swipe."))
+        preview_help = QLabel("Click the phone to tap or type. Drag to swipe. Ctrl+V pastes text.")
+        preview_help.setWordWrap(True)
+        controls.addWidget(preview_help)
         recording_group = QGroupBox("Record video + audio")
         recording_layout = QHBoxLayout(recording_group)
         self.record_start_button = QPushButton("Start recording")
@@ -674,6 +764,8 @@ class Controller(QMainWindow):
         container = QWidget(); container.setLayout(root)
         self.setCentralWidget(container)
 
+        self.screen.text_input.connect(self.send_preview_text)
+        self.screen.phone_key.connect(self.send_preview_key)
         self.screen.touch.connect(self.send_preview_touch)
         self.screen.tapped.connect(self.tap)
         self.screen.swipe.connect(self.swipe)
@@ -1109,6 +1201,14 @@ class Controller(QMainWindow):
         except Exception as exc:
             self.report_error(exc)
             QMessageBox.critical(self, "Uninstall failed", str(exc))
+
+    def send_preview_text(self, text, paste):
+        if self.frame_worker:
+            self.frame_worker.send_text(text, paste)
+
+    def send_preview_key(self, keycode, metastate):
+        if self.frame_worker:
+            self.frame_worker.send_key(keycode, metastate)
 
     def send_preview_touch(self, action, x, y, width, height):
         if self.frame_worker:

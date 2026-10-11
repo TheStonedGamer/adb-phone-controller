@@ -21,6 +21,14 @@ endpoint and matches transports by the phone's hardware serial. USB takes priori
 Changed Android wireless debugging ports must be entered again if ADB has not
 already discovered/connected the new endpoint. Disconnect pauses auto reconnect.
 
+## Type directly on the phone
+
+Click a text field in the phone preview, then type on your computer keyboard.
+Backspace, Delete, Enter, Tab, arrows, Home/End, and Ctrl+A are forwarded to Android.
+Ctrl+V pastes the computer clipboard, including multiline and Unicode text.
+Paste and non-ASCII typing update the phone clipboard. Click a controller input
+field to return keyboard focus to the desktop controls.
+
 ## Develop
 
 Requires Python 3.11+, ADB, and scrcpy. The embedded video client speaks scrcpy 5's
