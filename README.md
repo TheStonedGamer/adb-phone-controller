@@ -22,7 +22,9 @@ Changed Android wireless debugging ports must be entered again if ADB has not
 already discovered/connected the new endpoint. Disconnect pauses auto reconnect.
 
 Move the pointer over the phone image to scroll with the mouse wheel or trackpad.
-Horizontal scrolling and Shift+wheel are supported, including a rotated preview.
+Mouse-wheel scrolling glides and eases to a stop; trackpad momentum is preserved
+without adding a second inertial tail. Clicking the phone stops the glide. Horizontal
+scrolling and Shift+wheel are supported, including a rotated preview.
 
 ## Type directly on the phone
 

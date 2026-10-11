@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import math
 import shutil
 import socket
 import av
@@ -106,6 +107,11 @@ class ScreenView(QLabel):
         self._press: tuple[int, int] | None = None
         self._press_time = 0.0
         self._frame_rotation = 0
+        self._scroll_velocity = QPointF()
+        self._scroll_timer = QTimer(self)
+        self._scroll_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._scroll_timer.setInterval(16)
+        self._scroll_timer.timeout.connect(self._advance_scroll)
 
     def show_frame(self, image: QImage):
         if image.isNull():
@@ -211,9 +217,28 @@ class ScreenView(QLabel):
     def keyReleaseEvent(self, event):
         event.accept()
 
+    def stop_scrolling(self):
+        self._scroll_timer.stop()
+        self._scroll_velocity = QPointF()
+
+    def _advance_scroll(self):
+        context = (self._image_size, (self.rotation + self._frame_rotation) % 360)
+        if context != self._scroll_context or self._press is not None:
+            self.stop_scrolling()
+            return
+        now = time.monotonic()
+        elapsed = min(now - self._scroll_tick, 0.05)
+        self._scroll_tick = now
+        decay = math.exp(-elapsed / 0.18)
+        movement = self._scroll_velocity * (0.18 * (1 - decay))
+        self._scroll_velocity *= decay
+        self.phone_scroll.emit(*self._scroll_point, *self._image_size, movement.x(), movement.y())
+        if math.hypot(self._scroll_velocity.x(), self._scroll_velocity.y()) < 0.08:
+            self.stop_scrolling()
+
     def wheelEvent(self, event):
         point = self._device_point(event.position().toPoint())
-        if point is None:
+        if point is None or self._press is not None:
             event.ignore()
             return
         # Qt already applies the operating system's natural-scroll preference.
@@ -225,8 +250,27 @@ class ScreenView(QLabel):
             horizontal, vertical = vertical, 0.0
         rotation = (self.rotation + self._frame_rotation) % 360
         direction = QTransform().rotate(-rotation).map(QPointF(horizontal, vertical))
-        if direction.x() or direction.y():
-            self.phone_scroll.emit(*point, *self._image_size, direction.x(), direction.y())
+        # Trackpads report smooth motion and often their own momentum phases.
+        # Forward them as delivered rather than applying a second inertial tail.
+        if not pixels.isNull() or event.phase() != Qt.ScrollPhase.NoScrollPhase:
+            self.stop_scrolling()
+            if direction.x() or direction.y():
+                self.phone_scroll.emit(*point, *self._image_size, direction.x(), direction.y())
+        elif direction.x() or direction.y():
+            context = (self._image_size, rotation)
+            if not self._scroll_timer.isActive() or context != self._scroll_context:
+                self.stop_scrolling()
+                self._scroll_tick = time.monotonic()
+            if QPointF.dotProduct(direction, self._scroll_velocity) < 0:
+                self._scroll_velocity = QPointF()
+            self._scroll_point = point
+            self._scroll_context = context
+            self._scroll_velocity += direction / 0.18
+            speed = math.hypot(self._scroll_velocity.x(), self._scroll_velocity.y())
+            if speed > 40:
+                self._scroll_velocity *= 40 / speed
+            if not self._scroll_timer.isActive():
+                self._scroll_timer.start()
         event.accept()
 
     def mousePressEvent(self, event):
@@ -235,6 +279,7 @@ class ScreenView(QLabel):
         point = self._device_point(event.position().toPoint())
         if point is None:
             return
+        self.stop_scrolling()
         self.setFocus(Qt.FocusReason.MouseFocusReason)
         self._press = point
         self._gesture_size = self._image_size
@@ -889,6 +934,7 @@ class Controller(QMainWindow):
         if selected == self.serial and self.frame_worker:
             self.update_connection_badge(selected)
             return
+        self.screen.stop_scrolling()
         if self.record_process and self.record_process.poll() is None:
             self.stop_recording()
         if self.frame_worker:
