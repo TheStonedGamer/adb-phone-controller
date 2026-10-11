@@ -9,3 +9,5 @@ src/adb_phone_controller/vendor/
 packaging/pkg/
 packaging/src/
 *.pkg.tar.zst
+
+packaging/*.tar.gz
