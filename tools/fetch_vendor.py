@@ -20,11 +20,12 @@ def download(name):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--windows", action="store_true")
+    parser.add_argument("--linux", action="store_true")
     args = parser.parse_args()
     vendor = ROOT / "src/adb_phone_controller/vendor"
     vendor.mkdir(parents=True, exist_ok=True)
     (vendor / "scrcpy-server").write_bytes(download(f"scrcpy-server-v{VERSION}"))
-    if not args.windows:
+    if not args.windows and not args.linux:
         import shutil
         shutil.rmtree(vendor / "scrcpy", ignore_errors=True)
     if args.windows:
@@ -37,4 +38,16 @@ if __name__ == "__main__":
                 continue
             # Flat upstream directory; never trust archive paths as output paths.
             (target / Path(item.filename).name).write_bytes(archive.read(item))
+    if args.linux:
+        import io
+        import tarfile
+        target = vendor / "scrcpy"
+        target.mkdir(exist_ok=True)
+        with tarfile.open(fileobj=io.BytesIO(download(f"scrcpy-linux-x86_64-v{VERSION}.tar.gz")), mode="r:gz") as archive:
+            for item in archive.getmembers():
+                if not item.isfile():
+                    continue
+                dest = target / Path(item.name).name
+                dest.write_bytes(archive.extractfile(item).read())
+                dest.chmod(item.mode & 0o777)
     print(f"Verified scrcpy {VERSION} artifacts installed in {vendor}")

@@ -17,6 +17,8 @@ Sources, licenses, and upstream distribution notices:
 - FFmpeg: https://ffmpeg.org/legal.html
 - PyInstaller: https://pyinstaller.org/en/stable/license.html
 
-Linux packages use distribution-provided Qt, PyAV/FFmpeg, ADB, and scrcpy.
+Linux packages use distribution-provided Qt, PyAV/FFmpeg, and ADB. Arch uses its
+repository scrcpy package; Debian bundles the official Linux x86-64 scrcpy release
+and its included license notices.
 The application's license has not been selected; no open-source license grant is
 implied for the original application code. Select one before public distribution.

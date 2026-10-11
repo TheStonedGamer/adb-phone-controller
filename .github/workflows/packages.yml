@@ -14,6 +14,14 @@ jobs:
         with:
           python-version: '3.12'
       - run: python tools/build_linux.py --deb
+      - name: Install and check package on Debian 13
+        run: |
+          docker run --rm -v "$PWD:/src:ro" debian:13 sh -c '
+            apt-get update &&
+            apt-get install -y /src/dist/adb-phone-controller_0.1.0-1_amd64.deb &&
+            QT_QPA_PLATFORM=offscreen adb-phone-control --version &&
+            /usr/lib/adb-phone-controller/adb_phone_controller/vendor/scrcpy/adb version &&
+            /usr/lib/adb-phone-controller/adb_phone_controller/vendor/scrcpy/scrcpy --version'
       - uses: actions/upload-artifact@v4
         with:
           name: debian

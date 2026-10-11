@@ -9,7 +9,7 @@ and automatic USB preference / Wi-Fi fallback for the same phone.
 - **Windows x64:** extract the release ZIP and run `AndroidADBController.exe`.
   ADB and scrcpy are included. A console accompanies the UI so recording can stop
   gracefully; close the UI to exit. Some phones need an OEM USB driver.
-- **Debian 13 or newer:** `sudo apt install ./adb-phone-controller_0.1.0-1_all.deb`.
+- **Debian 13 or newer (x86-64):** `sudo apt install ./adb-phone-controller_0.1.0-1_amd64.deb`.
   APT resolves dependencies; older distributions may not provide compatible PySide6
   or PyAV packages. Debian 12 is not a supported package target.
 - **Arch Linux:** `sudo pacman -U adb-phone-controller-0.1.0-1-any.pkg.tar.zst`.
@@ -47,7 +47,8 @@ python tools/build_linux.py --arch  # on Arch, with makepkg and base-devel
 ```
 
 Linux packages install Python sources, verified scrcpy server, desktop entry, and
-launcher. Python dependencies are distribution packages, so these artifacts do not
+launcher. Debian also bundles the official Linux x86-64 scrcpy client because it
+is absent from Debian 13 main; Arch uses its repository client. Python dependencies are distribution packages, so these artifacts do not
 embed a host-specific glibc build. Arch packaging uses `--nodeps` because staging
 only copies files; installation still enforces all declared runtime dependencies.
 
@@ -64,6 +65,6 @@ platforms on their native runners. Tags `v*` also create a draft GitHub release.
 ## Current verification limits
 
 Linux video decoding, transport selection, touch event serialization, and indicator
-states were checked locally. Camera/video transitions have previously shown colour
-corruption; the session-aware decoder needs longer testing. Windows runtime behavior
-and Debian installation require native validation. Packaging is an initial preview.
+states were checked locally. CI also installs the package on Debian 13 and checks
+the frozen executable and bundled tools on Windows. Camera/video transitions have previously shown colour
+corruption; the session-aware decoder needs longer testing. Windows phone interaction and full Debian desktop behavior require native validation. Packaging is an initial preview.

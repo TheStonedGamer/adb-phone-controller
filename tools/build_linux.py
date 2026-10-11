@@ -33,6 +33,7 @@ subprocess.run(['python3', str(ROOT / 'tools/fetch_vendor.py')], check=True)
 dist = ROOT / 'dist'
 dist.mkdir(exist_ok=True)
 if args.deb:
+    subprocess.run(['python3', str(ROOT / 'tools/fetch_vendor.py'), '--linux'], check=True)
     with tempfile.TemporaryDirectory() as temp:
         staging = Path(temp)
         data = staging / 'data'
@@ -50,19 +51,21 @@ if args.deb:
             dest.chmod(mode)
         (control / 'control').write_text(f'''Package: {NAME}
 Version: {VERSION}-1
-Architecture: all
+Architecture: amd64
 Maintainer: Android ADB Controller contributors
-Depends: python3 (>= 3.11), python3-av (>= 14), python3-pyside6.qtwidgets, adb, scrcpy
+Depends: python3 (>= 3.11), python3-av (>= 14), python3-pyside6.qtwidgets, libudev1, libgcc-s1, libc6 (>= 2.35)
+Recommends: android-sdk-platform-tools-common
 Section: utils
 Priority: optional
 Description: Android screen mirroring and control over USB or Wi-Fi
  Embedded scrcpy video, native touch gestures, recording, and automatic transport selection.
 ''')
         package = b'!<arch>\n' + ar_member('debian-binary', b'2.0\n') + ar_member('control.tar.gz', tar_bytes(control)) + ar_member('data.tar.gz', tar_bytes(data))
-        output = dist / f'{NAME}_{VERSION}-1_all.deb'
+        output = dist / f'{NAME}_{VERSION}-1_amd64.deb'
         output.write_bytes(package)
         print(output)
 if args.arch:
+    subprocess.run(['python3', str(ROOT / 'tools/fetch_vendor.py')], check=True)
     source = ROOT / 'packaging' / f'{NAME}-{VERSION}.tar.gz'
     with tarfile.open(source, 'w:gz') as archive:
         for name in ['src/adb_phone_controller', 'packaging/linux-launcher', 'assets', 'README.md', 'THIRD_PARTY.md']:
