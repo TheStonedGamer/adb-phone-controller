@@ -12,11 +12,16 @@ ROOT = Path(__file__).resolve().parents[1]
 NAME = 'adb-phone-controller'
 VERSION = '0.1.0'
 
+def root_owned(info):
+    info.uid = info.gid = 0
+    info.uname = info.gname = 'root'
+    return info
+
 def tar_bytes(directory):
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode='w:gz', format=tarfile.GNU_FORMAT) as archive:
         for path in sorted(directory.iterdir()):
-            archive.add(path, arcname=path.name)
+            archive.add(path, arcname=path.name, filter=root_owned)
     return buffer.getvalue()
 
 def ar_member(name, data):
