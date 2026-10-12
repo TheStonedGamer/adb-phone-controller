@@ -612,6 +612,8 @@ class DeviceScanner(QThread):
                         identity = adb(["shell", "getprop", "ro.serialno"], serial=serial, timeout=2).decode().strip()
                     except Exception:
                         identity = ""
+                if identity.lower() in ("unknown", "null", "none"):
+                    identity = ""
                 records.append((serial, details, identity, not (":" in serial or serial.startswith("adb-") or "_adb-tls-" in serial)))
             self.devices_ready.emit(records)
         except Exception as exc:
@@ -1248,10 +1250,8 @@ class Controller(QMainWindow):
         if not dialog.port.value():
             QMessageBox.warning(self, "Port required", "Enter the current connection port shown in Wireless debugging.")
             return
-        self.settings.setValue("wifi/address", host)
-        self.settings.setValue("wifi/port", dialog.port.value())
-        self.settings.setValue("wifi/pair_port", dialog.pair_port.value())
-        self.settings.sync()
+        # Keep the current phone's endpoint until the new pairing succeeds.
+        endpoint = f"{host}:{dialog.port.value()}"
         try:
             code = dialog.pair_code.text().strip()
             if code:
@@ -1263,13 +1263,27 @@ class Controller(QMainWindow):
                     QMessageBox.warning(self, "Pairing failed", paired or "ADB did not confirm pairing.")
                     self.status.setText(paired or "Pairing failed")
                     return
-            result = adb(["connect", f"{host}:{dialog.port.value()}"], timeout=30).decode(errors="replace").strip()
+                self.device_library.remember_endpoint(endpoint)
+                if self.remembered_dialog:
+                    self.remembered_dialog.refresh()
+            result = adb(["connect", endpoint], timeout=30).decode(errors="replace").strip()
             self.status.setText(result or "ADB connect completed.")
             if "connected to" not in result.lower() and "already connected" not in result.lower():
                 QMessageBox.warning(self, "Connection failed", result or "ADB did not confirm the connection.")
                 return
+            self.device_library.remember_endpoint(endpoint)
+            try:
+                identity = adb(["shell", "getprop", "ro.serialno"], serial=endpoint, timeout=3).decode().strip()
+            except Exception:
+                identity = ""
+            if identity.lower() in ("unknown", "null", "none"):
+                identity = ""
+            self.device_library.remember([(endpoint, "", identity, False)], force=True)
             self.disconnect_phone()
-            self.settings.setValue("device/identity", "")
+            self.settings.setValue("wifi/address", host)
+            self.settings.setValue("wifi/port", dialog.port.value())
+            self.settings.setValue("wifi/pair_port", dialog.pair_port.value())
+            self.settings.setValue("device/identity", identity)
             self.settings.setValue("device/serial", f"{host}:{dialog.port.value()}")
             self.settings.sync()
             self.reconnect_phone()

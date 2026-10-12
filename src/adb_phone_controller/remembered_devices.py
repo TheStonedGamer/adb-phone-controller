@@ -1,5 +1,6 @@
 """Persistent phone library and its desktop picker."""
 import json
+import uuid
 from datetime import datetime
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -32,22 +33,68 @@ class DeviceLibrary:
             self.save()
 
     def save(self):
+        # Preserve devices added by another open controller instance. Explicit
+        # Forget actions are represented by tombstones, not an absent row.
+        self.settings.sync()
+        try:
+            persisted = json.loads(self.settings.value('devices/library', '[]'))
+        except (ValueError, TypeError):
+            persisted = []
+        ids = {entry['id'] for entry in self.entries}
+        if isinstance(persisted, list):
+            for entry in persisted:
+                if not isinstance(entry, dict) or not entry.get('id') or entry['id'] in ids:
+                    continue
+                if any(value and value in self.forgotten for value in
+                       (entry.get('identity'), entry.get('serial'), entry.get('wifi'))):
+                    continue
+                # Provisional rows merged into an identified phone stay merged.
+                if not entry.get('identity') and any(
+                    entry.get('serial') in (saved.get('serial'), saved.get('wifi'))
+                    for saved in self.entries):
+                    continue
+                self.entries.append(entry)
+                ids.add(entry['id'])
         self.settings.setValue('devices/library', json.dumps(self.entries))
         self.settings.setValue('devices/forgotten', json.dumps(sorted(self.forgotten)))
         self.settings.sync()
 
+    def remember_endpoint(self, endpoint):
+        """Persist a successful pairing even before its video connection works."""
+        entry = next((e for e in self.entries if endpoint in (e.get('serial'), e.get('wifi'))), None)
+        if entry is None:
+            entry = {'id': str(uuid.uuid4()), 'identity': '', 'serial': endpoint,
+                     'name': f'Android phone · {endpoint}', 'wifi': endpoint, 'seen': ''}
+            self.entries.append(entry)
+        self.forgotten.discard(endpoint)
+        self.save()
+        return entry
+
     def remember(self, records, force=False):
         for serial, details, identity, wired in records:
+            identity = identity if identity and identity.lower() not in ('unknown', 'null', 'none') else ''
             if force:
                 self.forgotten.difference_update((identity, serial))
             elif identity in self.forgotten or serial in self.forgotten:
                 continue
-            entry = next((e for e in self.entries if (identity and e.get('identity') == identity)
-                          or e.get('serial') == serial or e.get('wifi') == serial), None)
+            # Hardware identities take precedence. Reused IP addresses must
+            # never overwrite a different phone's saved identity or name.
+            entry = next((e for e in self.entries if identity and e.get('identity') == identity), None)
+            pending = next((e for e in self.entries if serial in (e.get('serial'), e.get('wifi'))
+                            and (not identity or not e.get('identity') or e.get('identity') == identity)), None)
+            if entry is None:
+                entry = pending
             if entry is None:
                 model = next((part[6:].replace('_', ' ') for part in details.split() if part.startswith('model:')), 'Android phone')
-                entry = {'id': identity or serial, 'identity': identity, 'name': model, 'wifi': ''}
+                entry = {'id': str(uuid.uuid4()), 'identity': identity, 'name': model, 'wifi': ''}
                 self.entries.append(entry)
+            elif pending is not None and pending is not entry and not pending.get('identity'):
+                # A newly paired endpoint has now been identified as an
+                # already remembered phone. Merge only that provisional row.
+                self.entries.remove(pending)
+            model = next((part[6:].replace('_', ' ') for part in details.split() if part.startswith('model:')), '')
+            if model and entry['name'].startswith('Android phone · '):
+                entry['name'] = model
             if identity:
                 entry['identity'] = identity
             entry['serial'] = serial
@@ -59,8 +106,9 @@ class DeviceLibrary:
 
     @staticmethod
     def matches(entry, record):
-        return bool((entry.get('identity') and entry['identity'] == record[2])
-                    or record[0] in (entry.get('serial'), entry.get('wifi')))
+        if entry.get('identity') and record[2]:
+            return entry['identity'] == record[2]
+        return record[0] in (entry.get('serial'), entry.get('wifi'))
 
 
 class RememberedDevicesDialog(QDialog):
