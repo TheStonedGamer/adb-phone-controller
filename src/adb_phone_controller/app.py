@@ -57,6 +57,17 @@ if BUNDLED_TOOLS.is_dir():
     os.environ["PATH"] = str(BUNDLED_TOOLS) + os.pathsep + os.environ.get("PATH", "")
 
 
+AUDIO_SOURCES = (
+    ("Full device output", "output"),
+    ("App playback", "playback"),
+    ("Phone microphone", "mic"),
+    ("Call — both sides (if supported)", "voice-call"),
+    ("Call — your voice (if supported)", "voice-call-uplink"),
+    ("Call — caller's voice (if supported)", "voice-call-downlink"),
+)
+CALL_AUDIO_NOTE = "Call capture depends on Android and phone firmware. It may be rejected or silent, even while a session is running."
+
+
 def notify(title, message):
     executable = shutil.which("notify-send") if sys.platform != "win32" else None
     if executable:
@@ -746,11 +757,13 @@ class RecordingSettingsDialog(QDialog):
         form.addRow("Video bitrate", self.bitrate)
 
         self.audio_source = QComboBox()
-        self.audio_source.addItem("App playback (some apps may block capture)", "playback")
-        self.audio_source.addItem("Full device output (may mute phone speaker)", "output")
-        self.audio_source.addItem("Phone microphone", "mic")
+        for label, source in AUDIO_SOURCES:
+            self.audio_source.addItem(label, source)
         self.audio_source.setCurrentIndex(max(0, self.audio_source.findData(settings.value("record/audio_source", "output"))))
         form.addRow("Audio source", self.audio_source)
+        audio_note = QLabel(CALL_AUDIO_NOTE)
+        audio_note.setWordWrap(True)
+        form.addRow(audio_note)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.save)
@@ -891,6 +904,16 @@ class Controller(QMainWindow):
         controls.addLayout(nav)
         audio_group = QGroupBox("Phone audio")
         audio_layout = QVBoxLayout(audio_group)
+        self.audio_capture_source = QComboBox()
+        for label, source in AUDIO_SOURCES:
+            self.audio_capture_source.addItem(label, source)
+        self.audio_capture_source.setCurrentIndex(max(0, self.audio_capture_source.findData(self.settings.value("audio/source", "output"))))
+        self.audio_capture_source.currentIndexChanged.connect(self.change_audio_source)
+        audio_layout.addWidget(self.audio_capture_source)
+        self.audio_source_hint = QLabel()
+        self.audio_source_hint.setWordWrap(True)
+        self.update_audio_source_hint()
+        audio_layout.addWidget(self.audio_source_hint)
         audio_layout.addWidget(self.audio_button)
         self.audio_status = QLabel("Audio stopped")
         self.audio_status.setWordWrap(True)
@@ -1029,6 +1052,8 @@ class Controller(QMainWindow):
         self.audio_process.finished.connect(self.audio_finished)
         self.audio_process.errorOccurred.connect(self.audio_failed)
         self.audio_output = ""
+        self.audio_stop_requested = False
+        self.active_audio_source = "output"
         self.record_process: subprocess.Popen | None = None
         self.record_log = None
         self.record_path: Path | None = None
@@ -1474,6 +1499,24 @@ class Controller(QMainWindow):
         self.start_video_preview()
         self.status.setText(f"Starting embedded scrcpy video for {self.serial}…")
 
+    def update_audio_source_hint(self):
+        source = self.audio_capture_source.currentData()
+        hint = CALL_AUDIO_NOTE if source.startswith("voice-call") else (
+            "Some apps block playback capture." if source == "playback" else
+            "Captures the phone microphone." if source == "mic" else
+            "Phone output plays here; the phone speaker may be muted.")
+        self.audio_source_hint.setText(hint)
+
+    def change_audio_source(self):
+        running = self.audio_process.state() != QProcess.ProcessState.NotRunning
+        if running:
+            self.stop_audio()
+        self.settings.setValue("audio/source", self.audio_capture_source.currentData())
+        self.settings.sync()
+        self.update_audio_source_hint()
+        if running:
+            self.open_audio()
+
     def open_audio(self):
         if self.audio_process.state() != QProcess.ProcessState.NotRunning:
             self.stop_audio()
@@ -1486,14 +1529,16 @@ class Controller(QMainWindow):
             self.audio_status.setText("Install scrcpy to play phone audio.")
             return
         self.audio_output = ""
-        self.audio_status.setText("Starting phone audio…")
+        self.audio_stop_requested = False
+        self.active_audio_source = self.audio_capture_source.currentData()
+        self.audio_status.setText(f"Starting {self.audio_capture_source.currentText()}…")
         self.audio_button.setText("Stop phone audio")
         # QProcess owns the audio-only session; no SDL or console window.
         self.audio_process.start(executable, ["--serial", self.serial, "--no-video",
-            "--no-window", "--no-control", "--require-audio", "--audio-source=output"])
+            "--no-window", "--no-control", "--require-audio", f"--audio-source={self.active_audio_source}"])
 
     def audio_started(self):
-        self.audio_status.setText("Phone audio session running")
+        self.audio_status.setText(f"Audio session running: {self.audio_capture_source.currentText()}")
 
     def read_audio_output(self):
         text = bytes(self.audio_process.readAllStandardOutput()).decode(errors="replace")
@@ -1504,8 +1549,11 @@ class Controller(QMainWindow):
     def audio_finished(self, code, _status):
         self.read_audio_output()
         self.audio_button.setText("Play phone audio")
-        if code != 0 and self.audio_output.strip():
-            self.audio_status.setText("Audio stopped: " + self.audio_output.strip().splitlines()[-1])
+        if code != 0 and not self.audio_stop_requested:
+            errors = [line for line in self.audio_output.splitlines() if "ERROR:" in line or "SecurityException" in line]
+            detail = errors[-1] if errors else (self.audio_output.strip().splitlines()[-1] if self.audio_output.strip() else f"Exit code {code}")
+            prefix = "Call capture failed or was rejected by the phone: " if self.active_audio_source.startswith("voice-call") else "Audio stopped: "
+            self.audio_status.setText(prefix + detail)
         else:
             self.audio_status.setText("Audio stopped")
 
@@ -1514,6 +1562,7 @@ class Controller(QMainWindow):
         self.audio_status.setText("Audio unavailable: " + self.audio_process.errorString())
 
     def stop_audio(self):
+        self.audio_stop_requested = True
         if self.audio_process.state() != QProcess.ProcessState.NotRunning:
             self.audio_process.terminate()
             if not self.audio_process.waitForFinished(1500):

@@ -186,3 +186,20 @@ swipe; holding a key does not skip multiple videos. Swipes follow the preview's
 rotation and are cancelled when switching devices or changing rotation. Turn the
 option off for normal arrow-key editing in phone text fields. Modified arrow keys
 and Left/Right keep their normal Android key behavior. This setting is remembered.
+
+### Call audio (device-dependent)
+
+In **Phone audio**, choose **Call — both sides**, **Call — your voice**, or
+**Call — caller's voice**, then click Play phone audio during a call. These map to
+scrcpy's `voice-call`, `voice-call-uplink`, and `voice-call-downlink` sources.
+Changing the source while playing restarts the audio session. The selection is
+remembered; there is no automatic fallback to a microphone or another source.
+
+To save call audio with a screen recording, choose the corresponding source under
+**Record video + audio → Settings → Audio source**, then start recording in Phone
+screen mode. This recording setting is separate from the live listening source.
+
+Android/firmware may deny these sources or deliver silence. A running session
+confirms that the process started, not that both voices are audible. Support has
+not been verified on the Samsung phone. See
+[scrcpy audio sources](https://github.com/Genymobile/scrcpy/blob/v5.0.1/doc/audio.md#source).
