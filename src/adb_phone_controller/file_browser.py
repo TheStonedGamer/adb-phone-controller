@@ -79,11 +79,15 @@ for item in .[!.]* ..?* *; do
     size=$(stat -c %s -- "$item" 2>/dev/null) || size=0
     printf '%s\\0%s\\0%s\\0' "$kind" "$size" "$item"
 done'''
-                output = self.execute(['exec-out', 'sh', '-c', shlex.quote(script)], timeout=20)
+                output = self.execute(['shell', '-T', 'sh', '-c', shlex.quote(script)], timeout=20)
+                if output and (not output.endswith(b'\0') or output.count(b'\0') % 3):
+                    raise RuntimeError('Invalid directory response: ' + output.decode(errors='replace')[:300])
                 fields = output.split(b'\0')
                 entries = []
                 for index in range(0, len(fields) - 2, 3):
                     kind, size, name = fields[index:index + 3]
+                    if kind not in (b'd', b'f') or not size.isdigit():
+                        raise RuntimeError('Invalid file metadata returned by the phone.')
                     name = name.decode('utf-8', errors='replace')
                     if not name or name in ('.', '..') or '/' in name:
                         continue
