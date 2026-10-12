@@ -176,3 +176,13 @@ runs without an extra scrcpy window and stops when disconnecting, switching phon
 or closing the controller. This forwards phone output, not its microphone; some
 protected audio may be unavailable. The phone may stop playing audio locally while
 forwarding is enabled.
+
+## Arrow keys for short videos
+
+Click the phone preview to focus it. With **↑ / ↓ navigate short videos** enabled,
+**Down** swipes up to the next video and **Up** swipes down to the previous video
+in Shorts, TikTok, Reels, and similar feeds. Each press sends one 200 ms touch
+swipe; holding a key does not skip multiple videos. Swipes follow the preview's
+rotation and are cancelled when switching devices or changing rotation. Turn the
+option off for normal arrow-key editing in phone text fields. Modified arrow keys
+and Left/Right keep their normal Android key behavior. This setting is remembered.

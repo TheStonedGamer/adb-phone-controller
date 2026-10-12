@@ -116,6 +116,12 @@ class ScreenView(QLabel):
         self._scroll_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._scroll_timer.setInterval(16)
         self._scroll_timer.timeout.connect(self._advance_scroll)
+        self.short_video_navigation = True
+        self._key_swipe = None
+        self._key_swipe_timer = QTimer(self)
+        self._key_swipe_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._key_swipe_timer.setInterval(16)
+        self._key_swipe_timer.timeout.connect(self._advance_key_swipe)
 
     def show_frame(self, image: QImage):
         if image.isNull():
@@ -196,6 +202,12 @@ class ScreenView(QLabel):
         alt = bool(modifiers & Qt.KeyboardModifier.AltModifier)
         meta = (4096 if ctrl else 0) | (1 if shift else 0) | (2 if alt else 0)
         key = event.key()
+        if (self.short_video_navigation and not modifiers
+                and key in (Qt.Key.Key_Up, Qt.Key.Key_Down)):
+            if not event.isAutoRepeat():
+                self.start_key_swipe(key == Qt.Key.Key_Down)
+            event.accept()
+            return
         if ctrl and not alt and key == Qt.Key.Key_V:
             text = QApplication.clipboard().text()
             if text:
@@ -221,7 +233,48 @@ class ScreenView(QLabel):
     def keyReleaseEvent(self, event):
         event.accept()
 
+    def start_key_swipe(self, next_video):
+        if self._image_size is None or self._press is not None or self._key_swipe is not None:
+            return
+        self.stop_scrolling()
+        width, height = self._image_size
+        rotation = (self.rotation + self._frame_rotation) % 360
+        display_width, display_height = (height, width) if rotation % 180 else (width, height)
+        scale = min(self.width() / display_width, self.height() / display_height)
+        offset = display_height * scale * 0.27
+        center = QPointF(self.width() / 2, self.height() / 2)
+        start = self._device_point(center + QPointF(0, offset if next_video else -offset))
+        end = self._device_point(center + QPointF(0, -offset if next_video else offset))
+        if start is None or end is None:
+            return
+        self._key_swipe = (start, end, self._image_size, rotation, time.monotonic())
+        self._key_swipe_last = start
+        self.touch.emit(0, *start, width, height)
+        self._key_swipe_timer.start()
+
+    def _advance_key_swipe(self):
+        if self._key_swipe is None:
+            return
+        start, end, size, rotation, started = self._key_swipe
+        if size != self._image_size or rotation != (self.rotation + self._frame_rotation) % 360:
+            self.cancel_key_swipe()
+            return
+        progress = min(1.0, (time.monotonic() - started) / 0.20)
+        point = tuple(round(a + (b - a) * progress) for a, b in zip(start, end))
+        self._key_swipe_last = point
+        self.touch.emit(2, *point, *size)
+        if progress >= 1:
+            self.cancel_key_swipe()
+
+    def cancel_key_swipe(self):
+        self._key_swipe_timer.stop()
+        if self._key_swipe is not None:
+            size = self._key_swipe[2]
+            self._key_swipe = None
+            self.touch.emit(1, *self._key_swipe_last, *size)
+
     def stop_scrolling(self):
+        self.cancel_key_swipe()
         self._scroll_timer.stop()
         self._scroll_velocity = QPointF()
 
@@ -843,6 +896,12 @@ class Controller(QMainWindow):
         self.audio_status.setWordWrap(True)
         audio_layout.addWidget(self.audio_status)
         controls.addWidget(audio_group)
+        self.short_video_keys = QCheckBox("↑ / ↓ navigate short videos")
+        self.short_video_keys.setChecked(self.settings.value("input/short_video_keys", True, type=bool))
+        self.screen.short_video_navigation = self.short_video_keys.isChecked()
+        self.short_video_keys.setToolTip("Click the phone preview, then Down for next video or Up for previous. Turn off for normal arrow-key editing.")
+        self.short_video_keys.toggled.connect(self.set_short_video_keys)
+        controls.addWidget(self.short_video_keys)
         controls.addLayout(text_row)
         controls.addLayout(coords)
         rotate_row = QHBoxLayout()
@@ -865,7 +924,7 @@ class Controller(QMainWindow):
         phone_rotation_row.addWidget(rotate_phone)
         phone_rotation_row.addWidget(auto_rotate)
         controls.addLayout(phone_rotation_row)
-        preview_help = QLabel("Click the phone to tap or type. Drag to swipe or use the scroll wheel. Ctrl+V pastes text.")
+        preview_help = QLabel("Click the phone to tap or type. Drag or use the scroll wheel. ↑/↓ switch short videos when enabled. Ctrl+V pastes text.")
         preview_help.setWordWrap(True)
         controls.addWidget(preview_help)
         camera_group = QGroupBox("Camera / webcam")
@@ -1165,7 +1224,14 @@ class Controller(QMainWindow):
         self.frame_worker.capture_error.connect(self.video_failed)
         self.frame_worker.start()
 
+    def set_short_video_keys(self, enabled):
+        self.screen.stop_scrolling()
+        self.screen.short_video_navigation = enabled and self.video_source.currentData() == "display"
+        self.settings.setValue("input/short_video_keys", enabled)
+        self.settings.sync()
+
     def change_video_source(self):
+        self.screen.short_video_navigation = self.short_video_keys.isChecked() and self.video_source.currentData() == "display"
         self.stop_webcam()
         if self.record_process and self.record_process.poll() is None:
             self.stop_recording()
@@ -1678,6 +1744,7 @@ class Controller(QMainWindow):
                 self.status.setText("Wait for the update operation to finish before closing.")
                 event.ignore()
                 return
+        self.screen.stop_scrolling()
         self.stop_audio()
         self.stop_webcam()
         self.refresh_timer.stop()
