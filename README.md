@@ -203,3 +203,16 @@ Android/firmware may deny these sources or deliver silence. A running session
 confirms that the process started, not that both voices are audible. Support has
 not been verified on the Samsung phone. See
 [scrcpy audio sources](https://github.com/Genymobile/scrcpy/blob/v5.0.1/doc/audio.md#source).
+
+## Browse and download phone files
+
+Click **Files…** or **Device → Browse files…**. Start in internal storage, use the
+Downloads/Camera/Pictures shortcuts, double-click folders, or enter an absolute
+phone folder path. **Storage devices** opens `/storage` to find accessible SD cards.
+Select multiple files or folders and click **Download selected…** to choose a local
+destination. Folders download recursively. Existing files are preserved by choosing
+another destination name. **Cancel transfer** removes the incomplete current item
+while keeping previously completed items; **Open download folder** shows the result.
+The browser is tied to the phone shown in its header, even if the main window
+switches devices. Only ADB-readable files are accessible; private app data and some
+Android/data folders may be restricted by Android. No phone files are modified.

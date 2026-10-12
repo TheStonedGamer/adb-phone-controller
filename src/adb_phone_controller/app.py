@@ -10,6 +10,7 @@ import shutil
 import socket
 import av
 from adb_phone_controller import __version__
+from adb_phone_controller.file_browser import FileBrowserDialog
 from adb_phone_controller.updater import UpdateDialog
 from adb_phone_controller.remembered_devices import DeviceLibrary, RememberedDevicesDialog
 import struct
@@ -804,6 +805,7 @@ class Controller(QMainWindow):
         self.device_library = DeviceLibrary(self.settings)
         self.remembered_dialog = None
         self.update_dialog = None
+        self.file_dialog = None
         self.latest_frame: QImage | None = None
         self.screen = ScreenView()
         self.screen_host = QWidget()
@@ -854,6 +856,8 @@ class Controller(QMainWindow):
         remembered = QPushButton("Your devices…")
         remembered.clicked.connect(self.open_remembered_devices)
         top.addWidget(remembered)
+        files_menu = self.menuBar().addMenu("Device")
+        files_menu.addAction("Browse files…", self.open_file_browser)
         updates = self.menuBar().addMenu("Help")
         updates.addAction("Check for updates…", self.open_updates)
         top.addWidget(self.connection_badge)
@@ -871,6 +875,9 @@ class Controller(QMainWindow):
         self.install_button = QPushButton("Install APK…")
         self.install_button.clicked.connect(self.install_apk)
         top.addWidget(self.install_button)
+        files_button = QPushButton("Files…")
+        files_button.clicked.connect(self.open_file_browser)
+        top.addWidget(files_button)
 
         self.back = QPushButton("← Back")
         self.home = QPushButton("⌂ Home")
@@ -1110,6 +1117,24 @@ class Controller(QMainWindow):
             self.status.setText("Waiting for phone over USB or paired Wi-Fi…")
         if self.remembered_dialog and self.remembered_dialog.isVisible():
             self.remembered_dialog.refresh()
+
+    def open_file_browser(self):
+        if not self.serial:
+            self.status.setText("Connect a phone first to browse its files.")
+            return
+        if self.file_dialog and self.file_dialog.serial != self.serial:
+            if self.file_dialog.busy():
+                self.status.setText("Finish or cancel the file transfer from the previous phone first.")
+                self.file_dialog.raise_()
+                return
+            self.file_dialog.close()
+            self.file_dialog.deleteLater()
+            self.file_dialog = None
+        if self.file_dialog is None:
+            self.file_dialog = FileBrowserDialog(self.serial, self)
+        self.file_dialog.show()
+        self.file_dialog.raise_()
+        self.file_dialog.activateWindow()
 
     def open_updates(self):
         if self.update_dialog is None:
@@ -1786,6 +1811,11 @@ class Controller(QMainWindow):
         self.text.clear()
 
     def closeEvent(self, event):
+        if self.file_dialog and self.file_dialog.busy():
+            self.status.setText("Finish or cancel the file transfer before closing.")
+            self.file_dialog.raise_()
+            event.ignore()
+            return
         if self.update_dialog:
             worker = self.update_dialog.worker
             installer = self.update_dialog.installer
