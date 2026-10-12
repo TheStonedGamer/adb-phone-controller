@@ -148,3 +148,31 @@ Driver/backend documentation: https://github.com/letmaik/pyvirtualcam#supported-
 **Auto rotate phone** restores sensor rotation. Apps that require a particular
 orientation may override the request. These controls change the phone's rotation
 setting; camera rotation and the preview rotation controls remain separate.
+
+## Remembered devices
+
+Open **Your devices…** beside the device selector for saved phones, availability,
+and USB/Wi-Fi connection status. Phones are saved automatically after ADB discovers
+them; the previously selected phone is migrated on first launch. Rename entries,
+update a saved Wireless debugging address/port, double-click to connect, or forget
+an entry. **Remember connected phones** restores forgotten entries. Forgetting an
+entry does not revoke Android's ADB pairing. Pairing codes are not stored.
+
+## Updates
+
+Use **Help → Check for updates…** to check the latest published GitHub release,
+read its notes, and download the package for your platform. Downloads are verified
+against the release's SHA256SUMS and saved under Downloads/AndroidADBController.
+Debian/Arch system installations can install the verified package after an
+administrator authentication prompt; restart the controller afterward. Windows
+portable and source installations open the download folder for manual installation.
+For Windows, extract the ZIP into a new folder and launch its executable.
+No automatic background installation occurs.
+
+## Audio in the controller
+
+The **Phone audio** section has Play/Stop controls and playback status. Playback
+runs without an extra scrcpy window and stops when disconnecting, switching phones,
+or closing the controller. This forwards phone output, not its microphone; some
+protected audio may be unavailable. The phone may stop playing audio locally while
+forwarding is enabled.

@@ -10,6 +10,8 @@ import shutil
 import socket
 import av
 from adb_phone_controller import __version__
+from adb_phone_controller.updater import UpdateDialog
+from adb_phone_controller.remembered_devices import DeviceLibrary, RememberedDevicesDialog
 import struct
 import signal
 import subprocess
@@ -19,7 +21,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal, QThread, QSettings, QStandardPaths, QRectF, QPointF, QEvent
+from PySide6.QtCore import Qt, QTimer, Signal, QThread, QSettings, QStandardPaths, QRectF, QPointF, QEvent, QProcess
 from PySide6.QtGui import QImage, QPixmap, QTransform, QColor
 from PySide6.QtWidgets import (
     QApplication,
@@ -731,6 +733,9 @@ class Controller(QMainWindow):
             config_dir = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
         config_dir.mkdir(parents=True, exist_ok=True)
         self.settings = QSettings(str(config_dir / "adb-phone-control.ini"), QSettings.Format.IniFormat)
+        self.device_library = DeviceLibrary(self.settings)
+        self.remembered_dialog = None
+        self.update_dialog = None
         self.latest_frame: QImage | None = None
         self.screen = ScreenView()
         self.screen_host = QWidget()
@@ -778,6 +783,11 @@ class Controller(QMainWindow):
         top = QHBoxLayout()
         top.addWidget(QLabel("Device"))
         top.addWidget(self.devices, 1)
+        remembered = QPushButton("Your devices…")
+        remembered.clicked.connect(self.open_remembered_devices)
+        top.addWidget(remembered)
+        updates = self.menuBar().addMenu("Help")
+        updates.addAction("Check for updates…", self.open_updates)
         top.addWidget(self.connection_badge)
         self.disconnect_button = QPushButton("Disconnect")
         self.disconnect_button.clicked.connect(self.disconnect_phone)
@@ -789,7 +799,6 @@ class Controller(QMainWindow):
         top.addWidget(self.connect_button)
         top.addWidget(self.capture_button)
         top.addWidget(self.scrcpy_button)
-        top.addWidget(self.audio_button)
 
         self.install_button = QPushButton("Install APK…")
         self.install_button.clicked.connect(self.install_apk)
@@ -825,6 +834,13 @@ class Controller(QMainWindow):
 
         controls = QVBoxLayout()
         controls.addLayout(nav)
+        audio_group = QGroupBox("Phone audio")
+        audio_layout = QVBoxLayout(audio_group)
+        audio_layout.addWidget(self.audio_button)
+        self.audio_status = QLabel("Audio stopped")
+        self.audio_status.setWordWrap(True)
+        audio_layout.addWidget(self.audio_status)
+        controls.addWidget(audio_group)
         controls.addLayout(text_row)
         controls.addLayout(coords)
         rotate_row = QHBoxLayout()
@@ -945,7 +961,13 @@ class Controller(QMainWindow):
         self.screen.swipe.connect(self.swipe)
         self.refresh_timer = QTimer(self); self.refresh_timer.timeout.connect(self.refresh_devices); self.refresh_timer.start(3000)
         self.frame_worker: VideoWorker | None = None
-        self.audio_process: subprocess.Popen | None = None
+        self.audio_process = QProcess(self)
+        self.audio_process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self.audio_process.started.connect(self.audio_started)
+        self.audio_process.readyReadStandardOutput.connect(self.read_audio_output)
+        self.audio_process.finished.connect(self.audio_finished)
+        self.audio_process.errorOccurred.connect(self.audio_failed)
+        self.audio_output = ""
         self.record_process: subprocess.Popen | None = None
         self.record_log = None
         self.record_path: Path | None = None
@@ -977,6 +999,7 @@ class Controller(QMainWindow):
     def apply_devices(self, records):
         if self.connection_paused:
             return
+        self.device_library.remember(records)
         self.device_records = {r[0]: r for r in records}
         self.device_identities = {r[0]: r[2] for r in records if r[2]}
         previous = self.serial or self.settings.value("device/serial", "")
@@ -999,6 +1022,46 @@ class Controller(QMainWindow):
         self.select_device()
         if not selected:
             self.status.setText("Waiting for phone over USB or paired Wi-Fi…")
+        if self.remembered_dialog and self.remembered_dialog.isVisible():
+            self.remembered_dialog.refresh()
+
+    def open_updates(self):
+        if self.update_dialog is None:
+            self.update_dialog = UpdateDialog(self)
+        self.update_dialog.show()
+        self.update_dialog.raise_()
+        self.update_dialog.activateWindow()
+
+    def open_remembered_devices(self):
+        if self.remembered_dialog is None:
+            self.remembered_dialog = RememberedDevicesDialog(self)
+        self.remembered_dialog.refresh()
+        self.remembered_dialog.show()
+        self.remembered_dialog.raise_()
+        self.remembered_dialog.activateWindow()
+
+    def connect_remembered_device(self, entry):
+        online = [r for r in getattr(self, "device_records", {}).values()
+                  if self.device_library.matches(entry, r)]
+        self.disconnect_phone()
+        self.settings.setValue("device/identity", entry.get("identity", ""))
+        self.settings.setValue("device/serial", entry.get("serial", ""))
+        endpoint = entry.get("wifi", "")
+        host, separator, port = endpoint.rpartition(":")
+        self.settings.setValue("wifi/address", host if separator else "")
+        self.settings.setValue("wifi/port", int(port) if separator and port.isdigit() else 0)
+        self.settings.sync()
+        self.connection_paused = False
+        self.devices.setEnabled(True)
+        self.disconnect_button.setEnabled(True)
+        if online:
+            target = min(online, key=lambda r: not r[3])[0]
+            self.devices.setCurrentIndex(self.devices.findData(target))
+            self.select_device()
+        else:
+            self.reconnect_phone()
+            if not endpoint:
+                self.status.setText(f"Connect {entry['name']} by USB, or save its Wi-Fi address in Your devices.")
 
     def disconnect_phone(self):
         self.connection_paused = True
@@ -1035,6 +1098,7 @@ class Controller(QMainWindow):
         if selected == self.serial and self.frame_worker:
             self.update_connection_badge(selected)
             return
+        self.stop_audio()
         self.stop_webcam()
         self.screen.stop_scrolling()
         if self.record_process and self.record_process.poll() is None:
@@ -1052,6 +1116,13 @@ class Controller(QMainWindow):
             if identity:
                 self.settings.setValue("device/identity", identity)
             record = getattr(self, "device_records", {}).get(selected)
+            if record and record[3]:
+                saved = next((entry for entry in self.device_library.entries
+                              if self.device_library.matches(entry, record)), None)
+                endpoint = saved.get("wifi", "") if saved else ""
+                host, separator, port = endpoint.rpartition(":")
+                self.settings.setValue("wifi/address", host if separator else "")
+                self.settings.setValue("wifi/port", int(port) if separator and port.isdigit() else 0)
             if record and not record[3] and ":" in selected:
                 host, port = selected.rsplit(":", 1)
                 if port.isdigit():
@@ -1197,6 +1268,10 @@ class Controller(QMainWindow):
             if "connected to" not in result.lower() and "already connected" not in result.lower():
                 QMessageBox.warning(self, "Connection failed", result or "ADB did not confirm the connection.")
                 return
+            self.disconnect_phone()
+            self.settings.setValue("device/identity", "")
+            self.settings.setValue("device/serial", f"{host}:{dialog.port.value()}")
+            self.settings.sync()
             self.reconnect_phone()
             QMessageBox.information(self, "Phone connected", result)
         except Exception as exc:
@@ -1320,17 +1395,52 @@ class Controller(QMainWindow):
         self.status.setText(f"Starting embedded scrcpy video for {self.serial}…")
 
     def open_audio(self):
+        if self.audio_process.state() != QProcess.ProcessState.NotRunning:
+            self.stop_audio()
+            return
         if not self.serial:
-            self.status.setText("Connect and select a device first.")
+            self.audio_status.setText("Connect and select a device first.")
             return
         executable = shutil.which("scrcpy")
         if not executable:
-            QMessageBox.information(self, "scrcpy required", "Install scrcpy to stream phone audio:\n\n    sudo pacman -S scrcpy")
+            self.audio_status.setText("Install scrcpy to play phone audio.")
             return
-        try:
-            subprocess.Popen([executable, "--serial", self.serial, "--no-video"], start_new_session=True)
-        except Exception as exc:
-            self.report_error(exc)
+        self.audio_output = ""
+        self.audio_status.setText("Starting phone audio…")
+        self.audio_button.setText("Stop phone audio")
+        # QProcess owns the audio-only session; no SDL or console window.
+        self.audio_process.start(executable, ["--serial", self.serial, "--no-video",
+            "--no-window", "--no-control", "--require-audio", "--audio-source=output"])
+
+    def audio_started(self):
+        self.audio_status.setText("Phone audio session running")
+
+    def read_audio_output(self):
+        text = bytes(self.audio_process.readAllStandardOutput()).decode(errors="replace")
+        self.audio_output = (self.audio_output + text)[-6000:]
+        if "ERROR:" in text:
+            self.audio_status.setText(next((line for line in reversed(text.splitlines()) if "ERROR:" in line), "Audio error"))
+
+    def audio_finished(self, code, _status):
+        self.read_audio_output()
+        self.audio_button.setText("Play phone audio")
+        if code != 0 and self.audio_output.strip():
+            self.audio_status.setText("Audio stopped: " + self.audio_output.strip().splitlines()[-1])
+        else:
+            self.audio_status.setText("Audio stopped")
+
+    def audio_failed(self, _error):
+        self.audio_button.setText("Play phone audio")
+        self.audio_status.setText("Audio unavailable: " + self.audio_process.errorString())
+
+    def stop_audio(self):
+        if self.audio_process.state() != QProcess.ProcessState.NotRunning:
+            self.audio_process.terminate()
+            if not self.audio_process.waitForFinished(1500):
+                self.audio_process.kill()
+                self.audio_process.waitForFinished(1000)
+        self.audio_button.setText("Play phone audio")
+        self.audio_status.setText("Audio stopped")
 
     def open_recording_settings(self):
         RecordingSettingsDialog(self.settings, self).exec()
@@ -1547,6 +1657,14 @@ class Controller(QMainWindow):
         self.text.clear()
 
     def closeEvent(self, event):
+        if self.update_dialog:
+            worker = self.update_dialog.worker
+            installer = self.update_dialog.installer
+            if (worker and worker.isRunning()) or (installer and installer.state().value != 0):
+                self.status.setText("Wait for the update operation to finish before closing.")
+                event.ignore()
+                return
+        self.stop_audio()
         self.stop_webcam()
         self.refresh_timer.stop()
         scanner = getattr(self, "device_scanner", None)
