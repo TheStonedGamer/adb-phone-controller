@@ -433,8 +433,22 @@ class VideoWorker(QThread):
         self._decoder = None
         self.latest_video_frame = None
         self._stop_event = threading.Event()
+        self._display_off_requested = False
+
+    def set_display_power(self, on):
+        if self.source != "display" or self._control_socket is None:
+            raise RuntimeError("Wait for the Phone screen live feed to connect first.")
+        # scrcpy 5 SET_DISPLAY_POWER: message type 10 + boolean (not Android's
+        # older numeric display-power modes). No POWER key/lock event is sent.
+        self._control_socket.sendall(struct.pack(">BB", 10, int(on)))
+        self._display_off_requested = not on
 
     def stop(self):
+        if self._display_off_requested:
+            try:
+                self.set_display_power(True)
+            except (OSError, RuntimeError):
+                pass
         self._stop_event.set()
         if self._socket:
             try:
@@ -954,6 +968,19 @@ class Controller(QMainWindow):
         phone_rotation_row.addWidget(rotate_phone)
         phone_rotation_row.addWidget(auto_rotate)
         controls.addLayout(phone_rotation_row)
+        display_row = QHBoxLayout()
+        screen_off = QPushButton("Screen off")
+        screen_off.setToolTip("Turn off the phone's physical display while keeping the live feed and controls available.")
+        screen_off.clicked.connect(lambda: self.set_phone_display(False))
+        screen_on = QPushButton("Screen on")
+        screen_on.setToolTip("Turn the phone's physical display back on.")
+        screen_on.clicked.connect(lambda: self.set_phone_display(True))
+        display_row.addWidget(screen_off)
+        display_row.addWidget(screen_on)
+        controls.addLayout(display_row)
+        self.display_status = QLabel("Phone display controls keep mirroring active.")
+        self.display_status.setWordWrap(True)
+        controls.addWidget(self.display_status)
         preview_help = QLabel("Click the phone to tap or type. Drag or use the scroll wheel. ↑/↓ switch short videos when enabled. Ctrl+V pastes text.")
         preview_help.setWordWrap(True)
         controls.addWidget(preview_help)
@@ -1265,6 +1292,7 @@ class Controller(QMainWindow):
         self.screen.clear()
         self.screen._image_size = None
         self.screen._source_pixmap = None
+        self.display_status.setText("Phone display controls keep mirroring active.")
         self.frame_worker = VideoWorker(self.serial, self.video_source.currentData())
         # Poll the newest frame instead of queueing every decoded image.
         if not hasattr(self, "video_timer"):
@@ -1432,6 +1460,17 @@ class Controller(QMainWindow):
         self.x.setMaximum(max(0, image.width() - 1)); self.y.setMaximum(max(0, image.height() - 1))
         if self.serial:
             self.status.setText(f"Live {self.video_source.currentText()} · {image.width()} × {image.height()} · rotation {self.screen.rotation}°")
+
+    def set_phone_display(self, on):
+        worker = self.frame_worker
+        if not worker or not worker.isRunning() or self.video_source.currentData() != "display":
+            self.display_status.setText("Connect a phone and select Phone screen first.")
+            return
+        try:
+            worker.set_display_power(on)
+            self.display_status.setText("Screen on requested." if on else "Screen off requested. Keep using the live view; the phone's power button also restores its display.")
+        except (RuntimeError, OSError) as exc:
+            self.display_status.setText(f"Display control failed: {exc}")
 
     def rotate_phone(self):
         if not self.serial:

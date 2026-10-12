@@ -216,3 +216,13 @@ while keeping previously completed items; **Open download folder** shows the res
 The browser is tied to the phone shown in its header, even if the main window
 switches devices. Only ADB-readable files are accessible; private app data and some
 Android/data folders may be restricted by Android. No phone files are modified.
+
+## Use the phone with its physical screen off
+
+In Phone screen mode, click **Screen off** to turn off the physical display while
+keeping the embedded live view and touch/keyboard controls active. **Screen on**
+restores the display; the phone's physical power button can also turn it on. These
+commands control display power rather than sending a lock-screen power key.
+Stopping the feed, disconnecting, or closing the app attempts to turn the display
+back on if this session requested it off. A lost connection may prevent that
+request from reaching the phone. Normal Android lock/timeout policies still apply.
