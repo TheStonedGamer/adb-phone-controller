@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import uuid
 from PySide6.QtCore import Qt, QThread, Signal, QStandardPaths, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
@@ -28,10 +29,11 @@ class FileWorker(QThread):
     failed = Signal(str)
     progress = Signal(str)
 
-    def __init__(self, serial, path=None, downloads=None, destination=None):
+    def __init__(self, serial, path=None, downloads=None, destination=None, uploads=None, remote_folder=None):
         super().__init__()
         self.serial, self.path = serial, path
         self.downloads, self.destination = downloads, destination
+        self.uploads, self.remote_folder = uploads, remote_folder
         self.cancelled = threading.Event()
 
     def cancel(self):
@@ -94,6 +96,37 @@ done'''
                     entries.append((name, kind == b'd', int(size) if size.isdigit() else 0))
                 self.result.emit((self.path, sorted(entries, key=lambda e: (not e[1], e[0].casefold()))))
                 return
+            if self.uploads is not None:
+                completed = []
+                for index, filename in enumerate(self.uploads):
+                    source = Path(filename)
+                    if not source.exists() or source.is_symlink():
+                        raise RuntimeError(f'Upload source unavailable or a symlink: {source}')
+                    if source.is_dir() and any(p.is_symlink() for p in source.rglob('*')):
+                        raise RuntimeError('Folders containing symbolic links cannot be uploaded.')
+                    remote = str(PurePosixPath(self.remote_folder) / source.name)
+                    staging = str(PurePosixPath(self.remote_folder) / ('.adb-upload-' + uuid.uuid4().hex))
+                    def command(script):
+                        return self.execute(['shell', '-T', 'sh', '-c', shlex.quote(script)], timeout=20)
+                    command('if [ -e ' + shlex.quote(remote) + ' ] || [ -L ' + shlex.quote(remote) + ' ]; then echo "Destination already exists; upload was not started" >&2; exit 1; fi; mkdir ' + shlex.quote(staging))
+                    self.progress.emit(f'Uploading {index + 1}/{len(self.uploads)}: {source.name}')
+                    try:
+                        staged_item = staging + '/item'
+                        self.execute(['push', str(source), staged_item])
+                        if self.cancelled.is_set():
+                            raise RuntimeError('Upload cancelled.')
+                        command('if [ -e ' + shlex.quote(remote) + ' ] || [ -L ' + shlex.quote(remote) + ' ]; then echo "Destination appeared during upload" >&2; exit 1; fi; mv ' + shlex.quote(staged_item) + ' ' + shlex.quote(remote))
+                    finally:
+                        # Delete only this operation's randomly named staging area,
+                        # even after cancellation. Never delete the final destination.
+                        try:
+                            subprocess.run(['adb', '-s', self.serial, 'shell', '-T', 'sh', '-c', shlex.quote('rm -rf -- ' + shlex.quote(staging))], capture_output=True, timeout=10,
+                                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0)
+                        except (OSError, subprocess.TimeoutExpired):
+                            pass
+                    completed.append(remote)
+                self.result.emit({'uploaded': completed})
+                return
             completed = []
             for index, remote in enumerate(self.downloads):
                 if self.cancelled.is_set():
@@ -129,6 +162,7 @@ class FileBrowserDialog(QDialog):
         self.current_path = '/sdcard'
         self.destination = None
         self.setWindowTitle('Phone files')
+        self.setAcceptDrops(True)
         self.resize(760, 520)
         layout = QVBoxLayout(self)
         title = QLabel('Phone files')
@@ -144,7 +178,7 @@ class FileBrowserDialog(QDialog):
         self.path = QLineEdit('/sdcard')
         self.path.returnPressed.connect(lambda: self.browse(self.path.text()))
         navigation.addWidget(self.path, 1)
-        go = QPushButton('Go')
+        go = QPushButton('Go / Refresh')
         go.clicked.connect(lambda: self.browse(self.path.text()))
         navigation.addWidget(go)
         layout.addLayout(navigation)
@@ -168,6 +202,12 @@ class FileBrowserDialog(QDialog):
         self.download = QPushButton('Download selected…')
         self.download.clicked.connect(self.download_selected)
         actions.addWidget(self.download)
+        upload = QPushButton('Upload files…')
+        upload.clicked.connect(self.choose_uploads)
+        actions.addWidget(upload)
+        upload_folder = QPushButton('Upload folder…')
+        upload_folder.clicked.connect(self.choose_upload_folder)
+        actions.addWidget(upload_folder)
         self.cancel = QPushButton('Cancel transfer')
         self.cancel.setEnabled(False)
         self.cancel.clicked.connect(self.cancel_operation)
@@ -207,7 +247,9 @@ class FileBrowserDialog(QDialog):
         self.start(FileWorker(self.serial, path=str(PurePosixPath(path))))
 
     def received(self, result):
-        if isinstance(result, tuple):
+        if isinstance(result, dict):
+            self.status.setText(f"Uploaded {len(result['uploaded'])} item(s). Refresh this folder to view them.")
+        elif isinstance(result, tuple):
             self.current_path, entries = result
             self.path.setText(self.current_path)
             self.files.clear()
@@ -240,6 +282,36 @@ class FileBrowserDialog(QDialog):
         if destination:
             self.destination = destination
             self.start(FileWorker(self.serial, downloads=selected, destination=destination))
+
+    def choose_uploads(self):
+        if self.busy():
+            return
+        filenames, _ = QFileDialog.getOpenFileNames(self, 'Upload files to ' + self.current_path)
+        self.upload_paths(filenames)
+
+    def choose_upload_folder(self):
+        if self.busy():
+            return
+        folder = QFileDialog.getExistingDirectory(self, 'Upload a folder to ' + self.current_path)
+        if folder:
+            self.upload_paths([folder])
+
+    def upload_paths(self, filenames):
+        if self.busy():
+            self.status.setText('Finish or cancel the current transfer first.')
+            return
+        if filenames:
+            self.start(FileWorker(self.serial, uploads=filenames, remote_folder=self.current_path))
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls() and all(url.isLocalFile() for url in event.mimeData().urls()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        filenames = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
+        if filenames:
+            self.upload_paths(filenames)
+            event.acceptProposedAction()
 
     def cancel_operation(self):
         if self.busy():

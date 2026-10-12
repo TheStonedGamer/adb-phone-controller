@@ -8,8 +8,11 @@ import re
 import math
 import shutil
 import socket
+import secrets
 import av
 from adb_phone_controller import __version__
+from adb_phone_controller.automation import AutomationEngine, AutomationDialog
+from adb_phone_controller.device_tools import DeviceToolsDialog, WirelessPage, AppsPage
 from adb_phone_controller.file_browser import FileBrowserDialog
 from adb_phone_controller.updater import UpdateDialog
 from adb_phone_controller.remembered_devices import DeviceLibrary, RememberedDevicesDialog
@@ -27,6 +30,7 @@ from PySide6.QtGui import QImage, QPixmap, QTransform, QColor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QTabWidget,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -289,6 +293,9 @@ class ScreenView(QLabel):
         self.cancel_key_swipe()
         self._scroll_timer.stop()
         self._scroll_velocity = QPointF()
+        if self._press is not None:
+            self.touch.emit(1, *self._last_touch, *self._gesture_size)
+            self._press = None
 
     def _advance_scroll(self):
         context = (self._image_size, (self.rotation + self._frame_rotation) % 360)
@@ -420,6 +427,8 @@ class WebcamWorker(QThread):
 
 
 class VideoWorker(QThread):
+    clipboard_received = Signal(str)
+    clipboard_error = Signal(str)
     frame_ready = Signal(QImage, int)
     capture_error = Signal(str)
 
@@ -434,13 +443,18 @@ class VideoWorker(QThread):
         self.latest_video_frame = None
         self._stop_event = threading.Event()
         self._display_off_requested = False
+        self._control_reader = None
+        self._control_lock = threading.Lock()
+        self._forward_port = None
 
     def set_display_power(self, on):
-        if self.source != "display" or self._control_socket is None:
+        control = self._control_socket
+        if self.source != "display" or control is None:
             raise RuntimeError("Wait for the Phone screen live feed to connect first.")
         # scrcpy 5 SET_DISPLAY_POWER: message type 10 + boolean (not Android's
         # older numeric display-power modes). No POWER key/lock event is sent.
-        self._control_socket.sendall(struct.pack(">BB", 10, int(on)))
+        with self._control_lock:
+            control.sendall(struct.pack(">BB", 10, int(on)))
         self._display_off_requested = not on
 
     def stop(self):
@@ -466,9 +480,60 @@ class VideoWorker(QThread):
             self.capture_error.emit("Keyboard unavailable until the live feed connects")
             return
         try:
-            control.sendall(packet)
+            with self._control_lock:
+                control.sendall(packet)
         except OSError as exc:
             self.capture_error.emit(f"Phone input failed: {exc}")
+
+    def set_clipboard(self, text):
+        payload = text.encode("utf-8")
+        if len(payload) > (1 << 18) - 14:
+            raise RuntimeError("Clipboard text exceeds 256 KiB.")
+        control = self._control_socket
+        if control is None:
+            raise RuntimeError("Wait for the phone screen connection.")
+        with self._control_lock:
+            control.sendall(struct.pack(">BQBI", 9, 0, 0, len(payload)) + payload)
+
+    def start_app(self, package):
+        payload = package.encode("utf-8")
+        if len(payload) > 255:
+            raise RuntimeError("App package name is too long.")
+        self.send_control(struct.pack(">BB", 16, len(payload)) + payload)
+
+    def _read_control_messages(self):
+        control = self._control_socket
+        try:
+            while not self._stop_event.is_set():
+                header = self._read_exact(control, 1)
+                if not header:
+                    return
+                if header == b"\x00":
+                    length = self._read_exact(control, 4)
+                    if len(length) != 4:
+                        return
+                    size = struct.unpack(">I", length)[0]
+                    if size > (1 << 18):
+                        raise RuntimeError("Invalid clipboard size from phone.")
+                    payload = self._read_exact(control, size)
+                    if len(payload) != size:
+                        return
+                    self.clipboard_received.emit(payload.decode("utf-8", errors="replace"))
+                elif header == b"\x01":
+                    if len(self._read_exact(control, 8)) != 8:
+                        return
+                elif header == b"\x02":
+                    metadata = self._read_exact(control, 4)
+                    if len(metadata) != 4:
+                        return
+                    _, size = struct.unpack(">HH", metadata)
+                    if len(self._read_exact(control, size)) != size:
+                        return
+                else:
+                    raise RuntimeError("Unexpected phone control message.")
+        except (OSError, RuntimeError) as exc:
+            if not self._stop_event.is_set():
+                self.clipboard_error.emit(f"Clipboard sync unavailable: {exc}")
 
     def send_key(self, keycode, metastate=0):
         # Android DOWN and UP together keep editing keys from becoming stuck.
@@ -512,7 +577,8 @@ class VideoWorker(QThread):
         packet = struct.pack(">BBQiiHHHII", 2, action, 0, x, y, width, height,
                              0 if action == 1 else 65535, 0, 0)
         try:
-            control.sendall(packet)
+            with self._control_lock:
+                control.sendall(packet)
         except OSError as exc:
             self.capture_error.emit(f"Touch input failed: {exc}")
 
@@ -546,21 +612,22 @@ class VideoWorker(QThread):
             if not server_jar.is_file():
                 raise RuntimeError(f"Could not find scrcpy server at {server_jar}")
             adb(["push", str(server_jar), "/data/local/tmp/scrcpy-server.jar"], serial=self.serial, timeout=20)
-            adb(["forward", "tcp:27183", "localabstract:scrcpy_00027183"], serial=self.serial, timeout=5)
+            scid = secrets.randbits(31)
+            self._forward_port = int(adb(["forward", "tcp:0", f"localabstract:scrcpy_{scid:08x}"], serial=self.serial, timeout=5).decode().strip())
             source_options = []
             if self.source != "display":
                 source_options = ["video_source=camera", f"camera_facing={self.source}",
                                   "camera_ar=16:9", "camera_fps=30", "control=false"]
             server = subprocess.Popen(
                 ["adb", "-s", self.serial, "shell", "CLASSPATH=/data/local/tmp/scrcpy-server.jar", "app_process", "/", "com.genymobile.scrcpy.Server", version,
-                 "scid=27183", "tunnel_forward=true", "send_device_meta=false",
+                 f"scid={scid:x}", "tunnel_forward=true", "send_device_meta=false",
                  "audio=false", "video_codec=h264", "max_size=1280", "max_fps=30"] + source_options,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
             self._process = server
             deadline = time.monotonic() + 15
             while not self._stop_event.is_set() and time.monotonic() < deadline:
                 try:
-                    candidate = socket.create_connection(("127.0.0.1", 27183), timeout=1)
+                    candidate = socket.create_connection(("127.0.0.1", self._forward_port), timeout=1)
                     try:
                         first_packet = candidate.recv(1)
                     except OSError:
@@ -586,8 +653,11 @@ class VideoWorker(QThread):
             self._socket = client
             client.settimeout(None)
             if self.source == "display":
-                self._control_socket = socket.create_connection(("127.0.0.1", 27183), timeout=2)
+                self._control_socket = socket.create_connection(("127.0.0.1", self._forward_port), timeout=2)
                 self._control_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                self._control_socket.settimeout(None)
+                self._control_reader = threading.Thread(target=self._read_control_messages, daemon=True)
+                self._control_reader.start()
             codec_header = self._read_exact(client, 4)
             if codec_header != b"h264":
                 raise RuntimeError(f"Unexpected scrcpy codec: {codec_header!r}")
@@ -634,7 +704,13 @@ class VideoWorker(QThread):
                 self.capture_error.emit(str(exc))
         finally:
             if self._control_socket:
+                try:
+                    self._control_socket.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
                 self._control_socket.close()
+                if self._control_reader:
+                    self._control_reader.join(timeout=2)
                 self._control_socket = None
             if client:
                 try:
@@ -650,7 +726,8 @@ class VideoWorker(QThread):
                         process.kill()
                         process.wait(timeout=2)
             try:
-                adb(["forward", "--remove", "tcp:27183"], serial=self.serial, timeout=3)
+                if self._forward_port:
+                    adb(["forward", "--remove", f"tcp:{self._forward_port}"], serial=self.serial, timeout=3)
             except Exception:
                 pass
             self._process = None
@@ -685,7 +762,7 @@ class DeviceScanner(QThread):
                     pass
             records = []
             for serial, details in found:
-                identity = self.identities.get(serial)
+                identity = self.identities.get(serial) if ":" not in serial else ""
                 if not identity:
                     try:
                         identity = adb(["shell", "getprop", "ro.serialno"], serial=serial, timeout=2).decode().strip()
@@ -820,12 +897,22 @@ class Controller(QMainWindow):
         self.remembered_dialog = None
         self.update_dialog = None
         self.file_dialog = None
+        self.tools_dialogs = {}
+        self.automation_dialog = None
+        self.automation = AutomationEngine(self)
+        self.device_sessions = {}
+        self.requested_device = None
+        self._syncing_clipboard = False
         self.latest_frame: QImage | None = None
         self.screen = ScreenView()
         self.screen_host = QWidget()
         self.screen_host_layout = QVBoxLayout(self.screen_host)
         self.screen_host_layout.setContentsMargins(0, 0, 0, 0)
-        self.screen_host_layout.addWidget(self.screen)
+        self.placeholder_screen = self.screen
+        self.device_tabs = QTabWidget()
+        self.device_tabs.setTabsClosable(True)
+        self.device_tabs.addTab(self.placeholder_screen, "No device")
+        self.screen_host_layout.addWidget(self.device_tabs)
         self.screen.set_rotation(int(self.settings.value("preview/rotation", 0)))
         self.devices = QComboBox()
         self.connection_badge = QWidget()
@@ -863,7 +950,7 @@ class Controller(QMainWindow):
         self.audio_button = QPushButton("Play phone audio")
         self.audio_button.setToolTip("Stream the selected phone's audio to this laptop")
         self.audio_button.clicked.connect(self.open_audio)
-        self.devices.currentIndexChanged.connect(self.select_device)
+        self.devices.currentIndexChanged.connect(self.user_select_device)
         top = QHBoxLayout()
         top.addWidget(QLabel("Device"))
         top.addWidget(self.devices, 1)
@@ -872,6 +959,13 @@ class Controller(QMainWindow):
         top.addWidget(remembered)
         files_menu = self.menuBar().addMenu("Device")
         files_menu.addAction("Browse files…", self.open_file_browser)
+        files_menu.addAction("Device tools…", self.open_device_tools)
+        files_menu.addAction("Connection diagnostics…", self.open_diagnostics)
+        files_menu.addAction("Automation shortcuts…", self.open_automation)
+        panels = files_menu.addMenu("Panels")
+        panels.addAction("Notifications", lambda: self.open_phone_panel(5))
+        panels.addAction("Quick Settings", lambda: self.open_phone_panel(6))
+        panels.addAction("Collapse panels", lambda: self.open_phone_panel(7))
         updates = self.menuBar().addMenu("Help")
         updates.addAction("Check for updates…", self.open_updates)
         top.addWidget(self.connection_badge)
@@ -883,15 +977,17 @@ class Controller(QMainWindow):
         top.addWidget(self.reconnect_button)
         top.addWidget(self.refresh_button)
         top.addWidget(self.connect_button)
-        top.addWidget(self.capture_button)
-        top.addWidget(self.scrcpy_button)
+        action_row = QHBoxLayout()
+        action_row.addWidget(self.capture_button)
+        action_row.addWidget(self.scrcpy_button)
 
         self.install_button = QPushButton("Install APK…")
         self.install_button.clicked.connect(self.install_apk)
-        top.addWidget(self.install_button)
+        action_row.addWidget(self.install_button)
         files_button = QPushButton("Files…")
         files_button.clicked.connect(self.open_file_browser)
-        top.addWidget(files_button)
+        action_row.addWidget(files_button)
+        action_row.addStretch()
 
         self.back = QPushButton("← Back")
         self.home = QPushButton("⌂ Home")
@@ -923,6 +1019,28 @@ class Controller(QMainWindow):
 
         controls = QVBoxLayout()
         controls.addLayout(nav)
+        panel_row = QHBoxLayout()
+        for label, code in (("Notifications", 5), ("Quick Settings", 6), ("Close panels", 7)):
+            button = QPushButton(label)
+            button.clicked.connect(lambda checked=False, code=code: self.open_phone_panel(code))
+            panel_row.addWidget(button)
+        controls.addLayout(panel_row)
+        self.clipboard_sync = QCheckBox("Sync clipboard with active phone")
+        self.clipboard_sync.setChecked(self.settings.value("input/clipboard_sync", False, type=bool))
+        self.clipboard_sync.setToolTip("Copied text is shared both ways with the active phone only. Ctrl+V works without automatic sync.")
+        self.clipboard_sync.toggled.connect(self.set_clipboard_sync)
+        controls.addWidget(self.clipboard_sync)
+        self.clipboard_status = QLabel("Clipboard sync is optional; Ctrl+V always pastes text.")
+        self.clipboard_status.setWordWrap(True)
+        controls.addWidget(self.clipboard_status)
+        tool_row = QHBoxLayout()
+        tools = QPushButton("Device tools…")
+        tools.clicked.connect(self.open_device_tools)
+        tool_row.addWidget(tools)
+        automation = QPushButton("Shortcuts…")
+        automation.clicked.connect(self.open_automation)
+        tool_row.addWidget(automation)
+        controls.addLayout(tool_row)
         audio_group = QGroupBox("Phone audio")
         audio_layout = QVBoxLayout(audio_group)
         self.audio_capture_source = QComboBox()
@@ -1066,6 +1184,7 @@ class Controller(QMainWindow):
         body.addWidget(sidebar)
         root = QVBoxLayout()
         root.addLayout(top)
+        root.addLayout(action_row)
         root.addWidget(self.status)
         root.addLayout(body, 1)
         container = QWidget(); container.setLayout(root)
@@ -1094,6 +1213,9 @@ class Controller(QMainWindow):
         self.record_timer = QTimer(self)
         self.record_timer.timeout.connect(self.check_recording)
         self.record_timer.start(500)
+        self.device_tabs.currentChanged.connect(self.device_tab_changed)
+        self.device_tabs.tabCloseRequested.connect(self.close_device_tab)
+        QApplication.clipboard().dataChanged.connect(self.host_clipboard_changed)
         self.refresh_devices()
 
     def report_error(self, error: Exception):
@@ -1122,17 +1244,25 @@ class Controller(QMainWindow):
         self.device_library.remember(records)
         self.device_records = {r[0]: r for r in records}
         self.device_identities = {r[0]: r[2] for r in records if r[2]}
-        previous = self.serial or self.settings.value("device/serial", "")
-        identity = self.settings.value("device/identity", "")
+        requested = self.requested_device
+        previous = requested.get("serial", "") if requested else (self.serial or self.settings.value("device/serial", ""))
+        identity = requested.get("identity", "") if requested else self.settings.value("device/identity", "")
         if not identity:
             identity = self.device_identities.get(previous, "")
         matching = [r for r in records if identity and r[2] == identity]
         if matching:
             selected = min(matching, key=lambda r: (not r[3], r[0] != previous))[0]
+        elif requested:
+            selected = previous if previous in self.device_records else (self.serial if self.serial in self.device_records else None)
         elif identity:
-            selected = None  # Wait for the same phone, even if another is connected.
+            selected = None
         else:
             selected = previous if previous in self.device_records else (records[0][0] if records else None)
+        if requested and (selected == requested.get("serial") or (identity and selected and self.device_identities.get(selected) == identity)):
+            self.requested_device = None
+        for serial in list(self.device_sessions):
+            if serial not in self.device_records and serial != self.serial:
+                self.remove_device_session(serial)
         self.devices.blockSignals(True)
         self.devices.clear()
         for serial, details, _, wired in records:
@@ -1140,10 +1270,193 @@ class Controller(QMainWindow):
         self.devices.setCurrentIndex(self.devices.findData(selected) if selected else -1)
         self.devices.blockSignals(False)
         self.select_device()
-        if not selected:
+        if self.requested_device:
+            self.status.setText("Waiting for the requested phone. Existing device tabs remain available.")
+        elif not selected:
             self.status.setText("Waiting for phone over USB or paired Wi-Fi…")
         if self.remembered_dialog and self.remembered_dialog.isVisible():
             self.remembered_dialog.refresh()
+
+    def open_device_tools(self, diagnostics=False):
+        serial = self.serial
+        if not serial and not diagnostics:
+            self.status.setText("Connect a phone first, or open Connection diagnostics from the Device menu.")
+            return
+        key = serial or "connections"
+        dialog = self.tools_dialogs.get(key)
+        if dialog is None:
+            host, port = self.settings.value("wifi/address", ""), self.settings.value("wifi/port", "")
+            dialog = DeviceToolsDialog(serial, f"{host}:{port}" if host and port else "", self)
+            for page in dialog.pages:
+                if isinstance(page, WirelessPage):
+                    page.connected.connect(self.wireless_device_added)
+                if isinstance(page, AppsPage):
+                    page.app_launched.connect(lambda package, target=serial: self.automation.record("launch", package) if target == self.serial else None)
+            self.tools_dialogs[key] = dialog
+        if diagnostics:
+            dialog.tabs.setCurrentIndex(dialog.tabs.count() - 1)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def open_diagnostics(self):
+        self.open_device_tools(diagnostics=True)
+
+    def wireless_device_added(self, endpoint):
+        self.device_library.remember_endpoint(endpoint)
+        self.next_wifi_retry = 0
+        self.refresh_devices()
+
+    def open_automation(self):
+        if self.automation_dialog is None:
+            self.automation_dialog = AutomationDialog(self.automation, self)
+        self.automation_dialog.show()
+        self.automation_dialog.raise_()
+        self.automation_dialog.activateWindow()
+
+    def open_phone_panel(self, code):
+        if self.frame_worker and self.frame_worker.source == "display" and self.frame_worker._control_socket:
+            self.frame_worker.send_control(bytes([code]))
+        else:
+            self.status.setText("Connect the Phone screen feed to control its panels.")
+
+    def set_clipboard_sync(self, enabled):
+        self.settings.setValue("input/clipboard_sync", enabled)
+        self.settings.sync()
+        self.clipboard_status.setText("Clipboard sync enabled for the active phone." if enabled else "Automatic clipboard sync is off.")
+
+    def host_clipboard_changed(self):
+        worker = self.frame_worker
+        mime = QApplication.clipboard().mimeData()
+        if self._syncing_clipboard or mime is None or not mime.hasText() or not self.clipboard_sync.isChecked() or not worker or worker.source != "display":
+            return
+        try:
+            worker.set_clipboard(QApplication.clipboard().text())
+            self.clipboard_status.setText("Copied text sent to active phone.")
+        except (OSError, RuntimeError) as exc:
+            self.clipboard_status.setText(str(exc))
+
+    def phone_clipboard_changed(self, text):
+        if self.sender() is not self.frame_worker or not self.clipboard_sync.isChecked():
+            return
+        clipboard = QApplication.clipboard()
+        if clipboard.text() == text:
+            return
+        self._syncing_clipboard = True
+        try:
+            clipboard.setText(text)
+        finally:
+            self._syncing_clipboard = False
+        self.clipboard_status.setText("Phone text copied to computer clipboard.")
+
+    def phone_clipboard_error(self, message):
+        if self.sender() is self.frame_worker:
+            self.clipboard_status.setText(message)
+
+    def new_device_screen(self):
+        screen = ScreenView()
+        screen.text_input.connect(self.send_preview_text)
+        screen.phone_key.connect(self.send_preview_key)
+        screen.phone_scroll.connect(self.send_preview_scroll)
+        screen.touch.connect(self.send_preview_touch)
+        screen.tapped.connect(self.tap)
+        screen.swipe.connect(self.swipe)
+        return screen
+
+    def activate_device_session(self, serial):
+        identity = getattr(self, "device_identities", {}).get(serial)
+        # USB and Wi-Fi for the same hardware share one tab. Migrate the stream
+        # to the preferred transport instead of creating a second encoder.
+        for other, session in list(self.device_sessions.items()):
+            if other != serial and identity and session.get("identity") == identity:
+                if not self.remove_device_session(other):
+                    return False
+        session = self.device_sessions.get(serial)
+        self.device_tabs.blockSignals(True)
+        if session is None:
+            screen = self.new_device_screen()
+            record = getattr(self, "device_records", {}).get(serial)
+            saved = next((entry for entry in self.device_library.entries if record and self.device_library.matches(entry, record)), None)
+            label = saved['name'] if saved else serial
+            session = {"screen": screen, "worker": None, "identity": identity, "label": label}
+            self.device_sessions[serial] = session
+            if self.device_tabs.indexOf(self.placeholder_screen) >= 0:
+                self.device_tabs.removeTab(self.device_tabs.indexOf(self.placeholder_screen))
+            index = self.device_tabs.addTab(screen, label)
+            self.device_tabs.tabBar().setTabData(index, serial)
+            self.device_tabs.setTabToolTip(index, label + "\n" + serial)
+        index = self.device_tabs.indexOf(session['screen'])
+        self.device_tabs.setCurrentIndex(index)
+        self.device_tabs.blockSignals(False)
+        self.screen = session['screen']
+        self.frame_worker = session['worker']
+        source = self.frame_worker.source if self.frame_worker else "display"
+        self.video_source.blockSignals(True)
+        self.video_source.setCurrentIndex(max(0, self.video_source.findData(source)))
+        self.video_source.blockSignals(False)
+        if self.frame_worker is None:
+            rotation = int(self.settings.value("preview/rotation", 0)) % 360
+            self.screen.set_rotation(rotation)
+        self.rotation_label.setText(f"{self.screen.rotation}°")
+        self.camera_rotation.blockSignals(True)
+        self.camera_rotation.setCurrentIndex(max(0, self.camera_rotation.findData(self.screen.rotation)))
+        self.camera_rotation.blockSignals(False)
+        self.camera_rotation.setEnabled(source != "display")
+        self.screen.short_video_navigation = self.short_video_keys.isChecked() and source == "display"
+        self.latest_frame = None
+        self.display_status.setText("Screen off was requested for this session." if self.frame_worker and self.frame_worker._display_off_requested else "Phone display controls keep mirroring active.")
+        return True
+
+    def remove_device_session(self, serial):
+        session = self.device_sessions.get(serial)
+        if not session:
+            return True
+        session['screen'].stop_scrolling()
+        worker = session['worker']
+        if worker:
+            worker.stop()
+            if not worker.wait(25000):
+                self.status.setText("Waiting for device stream to stop…")
+                return False
+        self.device_tabs.blockSignals(True)
+        index = self.device_tabs.indexOf(session['screen'])
+        if index >= 0:
+            self.device_tabs.removeTab(index)
+        session['screen'].deleteLater()
+        del self.device_sessions[serial]
+        if serial == self.serial:
+            self.frame_worker = None
+            self.latest_frame = None
+            self.screen = self.placeholder_screen
+        if not self.device_sessions and self.device_tabs.indexOf(self.placeholder_screen) < 0:
+            self.device_tabs.addTab(self.placeholder_screen, "No device")
+        self.device_tabs.blockSignals(False)
+        return True
+
+    def device_tab_changed(self, index):
+        if index < 0:
+            return
+        serial = self.device_tabs.tabBar().tabData(index)
+        if serial and serial != self.serial:
+            self.connection_paused = False
+            self.devices.setEnabled(True)
+            self.disconnect_button.setEnabled(True)
+            target = self.devices.findData(serial)
+            if target >= 0:
+                self.devices.setCurrentIndex(target)
+                self.select_device()
+
+    def close_device_tab(self, index):
+        serial = self.device_tabs.tabBar().tabData(index)
+        if not serial:
+            return
+        active = serial == self.serial
+        if active:
+            self.disconnect_phone()
+            if self.device_sessions:
+                self.device_tab_changed(self.device_tabs.currentIndex())
+        else:
+            self.remove_device_session(serial)
 
     def open_file_browser(self):
         if not self.serial:
@@ -1181,7 +1494,7 @@ class Controller(QMainWindow):
     def connect_remembered_device(self, entry):
         online = [r for r in getattr(self, "device_records", {}).values()
                   if self.device_library.matches(entry, r)]
-        self.disconnect_phone()
+        self.requested_device = {"identity": entry.get("identity", ""), "serial": entry.get("serial", "")}
         self.settings.setValue("device/identity", entry.get("identity", ""))
         self.settings.setValue("device/serial", entry.get("serial", ""))
         endpoint = entry.get("wifi", "")
@@ -1202,6 +1515,7 @@ class Controller(QMainWindow):
                 self.status.setText(f"Connect {entry['name']} by USB, or save its Wi-Fi address in Your devices.")
 
     def disconnect_phone(self):
+        self.requested_device = None
         self.connection_paused = True
         self.devices.blockSignals(True)
         self.devices.setCurrentIndex(-1)
@@ -1210,6 +1524,8 @@ class Controller(QMainWindow):
         self.devices.setEnabled(False)
         self.disconnect_button.setEnabled(False)
         self.status.setText("Disconnected · automatic reconnect paused")
+        if self.device_sessions:
+            self.device_tab_changed(self.device_tabs.currentIndex())
 
     def reconnect_phone(self):
         self.connection_paused = False
@@ -1231,6 +1547,10 @@ class Controller(QMainWindow):
         self.connection_badge.setToolTip(f"Active ADB connection: {label}\n{serial}" if connected else "No phone connected")
         self.connection_badge.setAccessibleName(f"Connection: {label}")
 
+    def user_select_device(self, *_):
+        self.requested_device = None
+        self.select_device()
+
     def select_device(self):
         selected = self.devices.currentData()
         if selected == self.serial and self.frame_worker:
@@ -1241,12 +1561,17 @@ class Controller(QMainWindow):
         self.screen.stop_scrolling()
         if self.record_process and self.record_process.poll() is None:
             self.stop_recording()
-        if self.frame_worker:
-            self.frame_worker.stop()
-            if not self.frame_worker.wait(25000):
-                self.status.setText("Waiting for previous connection to stop…")
+        self.automation.device_changed()
+        previous = self.serial
+        if not selected and previous:
+            if not self.remove_device_session(previous):
                 return
+        if selected:
+            if not self.activate_device_session(selected):
+                return
+        else:
             self.frame_worker = None
+            self.screen = self.placeholder_screen
         self.serial = selected
         self.update_connection_badge(selected)
         if selected:
@@ -1270,7 +1595,8 @@ class Controller(QMainWindow):
             self.settings.sync()
         if self.serial:
             self.status.setText(f"Connected to {self.serial}")
-            self.open_scrcpy()
+            if self.frame_worker is None:
+                self.open_scrcpy()
             self.refresh_apps()
         else:
             self.latest_frame = None
@@ -1282,7 +1608,9 @@ class Controller(QMainWindow):
     def start_video_preview(self):
         if not self.serial:
             return
+        self.automation.device_changed()
         self.stop_webcam()
+        self.screen.stop_scrolling()
         if self.frame_worker:
             self.frame_worker.stop()
             if not self.frame_worker.wait(25000):
@@ -1299,7 +1627,10 @@ class Controller(QMainWindow):
             self.video_timer = QTimer(self)
             self.video_timer.timeout.connect(self.present_video_frame)
             self.video_timer.start(16)
+        self.device_sessions[self.serial]['worker'] = self.frame_worker
         self.frame_worker.capture_error.connect(self.video_failed)
+        self.frame_worker.clipboard_received.connect(self.phone_clipboard_changed)
+        self.frame_worker.clipboard_error.connect(self.phone_clipboard_error)
         self.frame_worker.start()
 
     def set_short_video_keys(self, enabled):
@@ -1328,6 +1659,11 @@ class Controller(QMainWindow):
 
     def video_failed(self, message):
         if self.sender() is not self.frame_worker:
+            for session in self.device_sessions.values():
+                if session['worker'] is self.sender():
+                    index = self.device_tabs.indexOf(session['screen'])
+                    if index >= 0:
+                        self.device_tabs.setTabToolTip(index, message)
             return
         self.frame_worker.latest_video_frame = None
         self.stop_webcam()
@@ -1423,7 +1759,7 @@ class Controller(QMainWindow):
             if identity.lower() in ("unknown", "null", "none"):
                 identity = ""
             self.device_library.remember([(endpoint, "", identity, False)], force=True)
-            self.disconnect_phone()
+            self.requested_device = {"identity": identity, "serial": endpoint}
             self.settings.setValue("wifi/address", host)
             self.settings.setValue("wifi/port", dialog.port.value())
             self.settings.setValue("wifi/pair_port", dialog.pair_port.value())
@@ -1510,6 +1846,7 @@ class Controller(QMainWindow):
         self.apply_preview_rotation((self.screen.rotation + delta) % 360)
 
     def apply_preview_rotation(self, rotation: int):
+        self.automation.device_changed()
         rotation %= 360
         self.screen.stop_scrolling()
         self.screen.set_rotation(rotation)
@@ -1784,6 +2121,7 @@ class Controller(QMainWindow):
             return
         try:
             output = adb(["shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"], serial=self.serial, timeout=15).decode(errors="replace")
+            self.automation.record("launch", package)
             self.status.setText(f"Launched {package}")
         except Exception as exc:
             self.report_error(exc)
@@ -1811,18 +2149,30 @@ class Controller(QMainWindow):
             QMessageBox.critical(self, "Uninstall failed", str(exc))
 
     def send_preview_text(self, text, paste):
+        if isinstance(self.sender(), ScreenView) and self.sender() is not self.screen:
+            return
+        self.automation.record("text", [text, paste])
         if self.frame_worker:
             self.frame_worker.send_text(text, paste)
 
     def send_preview_key(self, keycode, metastate):
+        if isinstance(self.sender(), ScreenView) and self.sender() is not self.screen:
+            return
+        self.automation.record("key", [keycode, metastate])
         if self.frame_worker:
             self.frame_worker.send_key(keycode, metastate)
 
     def send_preview_scroll(self, x, y, width, height, horizontal, vertical):
+        if isinstance(self.sender(), ScreenView) and self.sender() is not self.screen:
+            return
         if self.frame_worker:
             self.frame_worker.send_scroll(x, y, width, height, horizontal, vertical)
 
     def send_preview_touch(self, action, x, y, width, height):
+        if isinstance(self.sender(), ScreenView) and self.sender() is not self.screen:
+            return
+        if width and height:
+            self.automation.record("touch", [action, x / width, y / height])
         if self.frame_worker:
             self.frame_worker.send_touch(action, x, y, width, height)
 
@@ -1837,19 +2187,28 @@ class Controller(QMainWindow):
         self.run_device(args)
 
     def keyevent(self, key: str):
-        self.run_device(["shell", "input", "keyevent", key])
+        code = {"BACK": 4, "HOME": 3, "APP_SWITCH": 187}.get(key)
+        if code is not None and self.frame_worker and self.frame_worker._control_socket:
+            self.send_preview_key(code, 0)
+        else:
+            self.run_device(["shell", "input", "keyevent", key])
 
     def send_text(self):
         value = self.text.text()
         if not value:
             return
-        # Android input text treats spaces as %s. Escape shell metacharacters by
-        # passing the full command as one safely quoted argument to `adb shell`.
-        safe = value.replace("%", "%25").replace(" ", "%s")
-        self.run_device(["shell", "input", "text", safe])
+        if self.frame_worker and self.frame_worker._control_socket:
+            self.send_preview_text(value, not value.isascii())
+        else:
+            self.status.setText("Connect the Phone screen feed before sending text.")
+            return
         self.text.clear()
 
     def closeEvent(self, event):
+        if any(dialog.busy() for dialog in self.tools_dialogs.values()):
+            self.status.setText("Wait for the device tools operation to finish before closing.")
+            event.ignore()
+            return
         if self.file_dialog and self.file_dialog.busy():
             self.status.setText("Finish or cancel the file transfer before closing.")
             self.file_dialog.raise_()
@@ -1862,6 +2221,9 @@ class Controller(QMainWindow):
                 self.status.setText("Wait for the update operation to finish before closing.")
                 event.ignore()
                 return
+        self.automation.device_changed()
+        for dialog in self.tools_dialogs.values():
+            dialog.stop_logs()
         self.screen.stop_scrolling()
         self.stop_audio()
         self.stop_webcam()
@@ -1869,9 +2231,10 @@ class Controller(QMainWindow):
         scanner = getattr(self, "device_scanner", None)
         if scanner and scanner.isRunning():
             scanner.wait(15000)
-        if self.frame_worker:
-            self.frame_worker.stop()
-            self.frame_worker.wait(3000)
+        for serial in list(self.device_sessions):
+            if not self.remove_device_session(serial):
+                event.ignore()
+                return
         if self.record_process and self.record_process.poll() is None:
             try:
                 stop_recording_process(self.record_process)

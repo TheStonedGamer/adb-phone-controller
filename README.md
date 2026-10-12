@@ -215,7 +215,7 @@ another destination name. **Cancel transfer** removes the incomplete current ite
 while keeping previously completed items; **Open download folder** shows the result.
 The browser is tied to the phone shown in its header, even if the main window
 switches devices. Only ADB-readable files are accessible; private app data and some
-Android/data folders may be restricted by Android. No phone files are modified.
+Android/data folders may be restricted by Android. Browsing and downloading do not modify phone files; uploads write to the selected folder.
 
 ## Use the phone with its physical screen off
 
@@ -226,3 +226,80 @@ commands control display power rather than sending a lock-screen power key.
 Stopping the feed, disconnecting, or closing the app attempts to turn the display
 back on if this session requested it off. A lost connection may prevent that
 request from reaching the phone. Normal Android lock/timeout policies still apply.
+
+## Device toolbox
+
+Open **Device → Device tools…** or **Device tools…** in the sidebar. Each tools
+window stays tied to the device named in its title, even when switching tabs.
+
+| Feature | Where to find it |
+|---|---|
+| File uploads | **Files… → Upload files / Upload folder**, or drag local files into the browser |
+| Clipboard sync | Enable **Sync clipboard with active phone** in the sidebar |
+| APK export | **Device tools → Apps & APK backup → Export APKs…** |
+| App management | Search packages, launch, force stop, clear cache/data, and inspect permissions in **Apps & APK backup** |
+| Device dashboard | **Device tools → Dashboard**: battery, charging, storage, memory, model, Android version |
+| Phone panels | Sidebar **Notifications / Quick Settings / Close panels**, or **Device → Panels** |
+| Log viewer | **Device tools → Logs**: live logcat, text/error filters, crash buffer, save filtered logs |
+| Automation | **Shortcuts…** or **Device → Automation shortcuts…** |
+| USB-to-Wi-Fi setup | **Device tools → Wireless setup** |
+| Multiple phone views | Select additional devices to open live tabs; click a tab to switch, or its × to disconnect it |
+| Connection diagnostics | **Device → Connection diagnostics…**, also available with no phone connected |
+
+### File uploads
+
+Browse to the destination folder on the phone before choosing files/folders or
+using drag-and-drop. Uploads do not overwrite existing phone files. Each item is
+staged in a randomly named hidden directory before moving into place. Cancellation
+attempts to remove only that staging directory; a dropped connection can leave it
+behind. Folders containing symbolic links are rejected. Press **Go / Refresh**
+after an upload to reload the folder.
+
+### Clipboard
+
+Automatic clipboard sync is optional and off by default. When enabled, text copied
+on either side is shared with the **active phone only**. File clipboard content is
+not forwarded. Ctrl+V still works without automatic sync. Android may restrict
+clipboard access. The app does not synchronize historical clipboard entries.
+
+### Apps and APK export
+
+APK export includes base and split APKs in a new local folder, and excludes private
+app data. Reinstallation may need `adb install-multiple` with all exported APKs.
+Cache clearing is offered only if Android advertises the per-app `--cache-only`
+command; otherwise use the phone's app storage settings. **Clear data** requires
+confirmation because it removes local app data and sign-ins. Permission inspection
+shows Android's package report, including requested and granted permissions.
+
+### Automation shortcuts
+
+Click **Record interactions**, return to the controller, perform taps/swipes,
+typing, navigation and app launches, then return to **Stop & save**. Saved shortcuts
+can be renamed, deleted, replayed, and extended with an app launch or a wait.
+Typed text is saved in the shortcut; only record text you intend to retain. Replay
+uses the active Phone screen session and stops if the phone, stream, or preview
+rotation changes. Touch coordinates are stored proportionally to the stream;
+shortcuts work best with the same app layout and device orientation. This is
+interaction replay, not app-aware scripting or a mechanism to bypass lock screens.
+
+### Wireless setup
+
+Select an authorized **USB** transport, open **Wireless setup**, optionally enter
+the Wi-Fi IP and TCP port, then choose **Enable Wi-Fi from USB and connect**. The
+app detects the Wi-Fi address when possible, enables TCP ADB, connects, and saves
+the endpoint. USB may be unplugged once connection is confirmed. **Restore USB-only
+ADB** requests a return to USB mode. Use a trusted local network. Android 11+
+Wireless debugging pairing remains available through **Connect over Wi-Fi…**.
+
+### Multiple devices and diagnostics
+
+Each live tab owns its own scrcpy session, local forwarding port, display state,
+and preview widget. Switching phones keeps existing live tabs running, while audio,
+webcam output, and shortcut replay stop on an active-phone change. USB/Wi-Fi
+transports with the same hardware identity share a tab and prefer USB when active.
+Closing a tab stops that session. Closing the app stops all sessions.
+
+Diagnostics inspect ADB version, device authorization/offline states, wireless
+discovery support, TCP reachability, and Linux routing where available. They report
+possible VPN/local-network conflicts without changing network settings. Live logs
+are capped at 10,000 lines and are not collected until **Start live logs** is used.
